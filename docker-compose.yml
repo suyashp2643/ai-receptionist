@@ -1,0 +1,67 @@
+# Future local-development stack. NOT runtime-tested — Docker Desktop is not
+# installed in the current environment (see docs/docker-setup.md). Syntax was
+# validated with a YAML parser only. Use docs/local-development.md for the
+# supported non-Docker workflow in the meantime.
+#
+# All credentials below are local-only development defaults, overridable via
+# a real .env file (never committed) — see .env.example.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ai_receptionist}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ai_receptionist}
+      POSTGRES_DB: ${POSTGRES_DB:-ai_receptionist}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ai_receptionist}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-ai_receptionist}:${POSTGRES_PASSWORD:-ai_receptionist}@postgres:5432/${POSTGRES_DB:-ai_receptionist}
+      REDIS_URL: redis://redis:6379/0
+      CORS_ALLOW_ORIGINS: http://localhost:3000
+      ENVIRONMENT: development
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:

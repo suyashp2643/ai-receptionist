@@ -1,0 +1,35 @@
+# --- Environment / secrets ---
+.env
+.env.local
+.env.*.local
+backend/.env
+frontend/.env.local
+
+# --- Python (backend) ---
+backend/.venv/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+backend/htmlcov/
+backend/.coverage
+
+# --- Node (frontend / widget) ---
+node_modules/
+frontend/.next/
+frontend/out/
+widget/dist/
+npm-debug.log*
+.npm/
+
+# --- Build / OS artifacts ---
+*.log
+.DS_Store
+Thumbs.db
+
+# --- Editors ---
+.vscode/*
+!.vscode/extensions.json
+.idea/
