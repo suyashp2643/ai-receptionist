@@ -3,11 +3,9 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+import app.models  # noqa: F401  # registers all models on Base.metadata for autogenerate
 from app.config import get_settings
 from app.db.base import Base
-
-# Import model modules here as they are added so Alembic autogenerate can see them.
-# No tenant-owned models exist yet in Phase 1.
 
 config = context.config
 

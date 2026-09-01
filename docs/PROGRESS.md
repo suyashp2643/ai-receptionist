@@ -134,8 +134,115 @@ re-run against the live database and passed unchanged.
   explicitly in a future step if desired, then re-running `npm audit` and
   the full frontend build/test suite to confirm no regression.
 
-## Upcoming — Phase 2 (not started)
+## Phase 2 — Authentication, Multi-Tenancy & Isolation (complete, pending commit approval)
 
-Multi-tenancy core: `Tenant`/`TenantMember` models, email/password auth
-(Argon2, access + refresh tokens), tenant-scoped repository layer, and the
-automated tenant-isolation test suite. Awaiting approval before starting.
+**Models** (`backend/app/models/`): `User` (global), `Tenant`, `TenantMember`
+(unique on `(tenant_id, user_id)`), `RefreshToken` (rotation + reuse
+detection). Native Postgres enums for `tenant_status`,
+`tenant_member_role`, `tenant_member_status` — explicitly configured with
+`values_callable` so the DB stores lowercase values matching the API
+(SQLAlchemy's default would store the Python enum *name* instead). Full
+schema: `docs/database-schema.md`.
+
+**Migration**: one hand-reviewed Alembic revision
+(`6c6136895656_create_users_tenants_tenant_members_.py`). Two issues found
+and fixed during review before it was ever applied: (1) the enum-value
+default described above, and (2) `downgrade()` needed explicit `DROP TYPE`
+statements for all three enums — dropping a table does not drop the Postgres
+enum type it used, so a downgrade→upgrade cycle would otherwise fail with
+"type already exists." Verified end-to-end against the real
+`ai_receptionist_dev` database: `upgrade head` → schema inspected column-by-
+column (FKs, cascades, unique constraints, indexes, enum labels all
+correct) → `downgrade -1` → `upgrade head` again, no errors. Connection
+string was never printed at any point.
+
+**Authentication**: Argon2id hashing (`argon2-cffi`), JWT access tokens
+(HS256, algorithm whitelisted, `iss`/`aud` validated, 15 min default),
+opaque SHA-256-hashed refresh tokens (256-bit random, 30 day default) with
+rotation and family-wide revocation on reuse. Login/registration timing and
+error messages are deliberately generic (see `docs/security.md`). Full
+design: `docs/security.md`.
+
+**Cookies & CSRF**: `HttpOnly`, environment-aware-`Secure`, `SameSite=Lax`
+refresh cookie; separate non-`HttpOnly` CSRF cookie (stable per session,
+not rotated); double-submit CSRF check applied only to `/auth/refresh` and
+`/auth/logout` (the only cookie-authenticated state-changing routes).
+
+**Tenant context & permissions**: `app/api/deps.get_tenant_context`
+resolves role from the database using the `{tenant_id}` URL path parameter
+only — never from the request body or JWT. `require_tenant_role(minimum)`
+centralizes every permission check; no route file contains its own
+role-name comparison. Non-member → `404`; insufficient role → `403` — a
+deliberate distinction (see `docs/security.md`).
+
+**Tenant-scoped repository**: `app/repositories/base.TenantScopedRepository`,
+used by `TenantMemberScopedRepository` for the members-listing endpoint;
+`User`/`Tenant` deliberately use separate plain repositories since they
+aren't tenant-owned/are the scoping root.
+
+**API endpoints** (`docs/api.md`): `POST /auth/{register,login,refresh,logout}`,
+`GET /auth/me`, `POST /tenants`, `GET /tenants`, `GET /tenants/{id}`,
+`PATCH /tenants/{id}`, `GET /tenants/{id}/members`.
+
+**Frontend**: `/register`, `/login`, `/dashboard` (protected — redirects to
+`/login` if a silent refresh on load fails), `src/lib/auth-context.tsx`
+(access token in React state only, never `localStorage`), `src/lib/api.ts`
+(attaches `Authorization` header, retries once through `/auth/refresh` on a
+401, attaches the CSRF header for cookie-authenticated calls).
+
+### Two real bugs found and fixed during test-writing (not just test bugs)
+
+1. **`clear_auth_cookies` called before `raise HTTPException` was a no-op.**
+   FastAPI discards the `response` object injected into a route function
+   when that route raises — the exception handler builds an entirely new
+   response. Any cookies "cleared" on the discarded object never reached the
+   client. Fixed by returning a `JSONResponse` directly from the error path
+   in `refresh()` instead of raising, so the cleared cookies are on the
+   response that's actually sent. Caught by
+   `test_logout_revokes_session_and_refresh_then_fails` and
+   `test_refresh_token_reuse_revokes_entire_family` initially failing with
+   stale-cookie symptoms.
+2. **CSRF cookie was rotating on every refresh**, invalidating a header a
+   client had legitimately just read. Fixed by making the CSRF cookie
+   stable for the life of a session (refresh/logout re-set the *same* value
+   instead of generating a new one) — simpler and just as secure, since
+   only the refresh token itself needs rotation for reuse detection.
+
+### Verification results (all passing)
+
+- Backend: `pytest` **37/37** passed (auth, authorization, tenant-isolation
+  at both HTTP and repository level, CORS), `ruff check` clean, `mypy`
+  clean (41 files)
+- `alembic current` / `upgrade head` / `downgrade -1` / `upgrade head`: all
+  verified against `ai_receptionist_dev`, no errors, connection string
+  never printed
+- Frontend: `eslint` clean, `tsc --noEmit` clean, `next build` succeeded
+  (`/`, `/register`, `/login`, `/dashboard` all prerendered)
+- Widget: unchanged from Phase 1, still clean
+- **Live integration check** (register → confirm owner membership → login →
+  load `/me` and tenant → update tenant as owner → logout → confirm refresh
+  rejected → confirm cross-tenant access rejected): all steps passed against
+  the running backend + real database. Test data was cleaned up from
+  `ai_receptionist_dev` afterward (confirmed by database name before
+  deletion). No token, cookie, or password value was printed at any point.
+
+### Known limitations / carried forward
+
+- Invitation delivery (email invites) is explicitly out of scope — the
+  `TenantMemberStatus.INVITED` value and `invited_at` column exist for
+  forward compatibility but nothing sets them yet.
+- No automated cleanup job for expired refresh tokens yet
+  (`RefreshTokenRepository.delete_expired` exists as a helper, not wired to
+  a scheduler).
+- `docker-compose.yml` / Dockerfiles remain untested (carried from Phase 1).
+- Frontend `postcss` advisory remains open (carried from Phase 1 — see
+  above), unaffected by Phase 2 changes.
+- Login-CSRF (an attacker forging a cross-site login request into their own
+  account) is not separately mitigated — low severity, and out of scope for
+  the double-submit pattern applied here (which targets cookie-authenticated
+  actions, and login doesn't rely on a pre-existing cookie).
+
+## Upcoming — Phase 3 (not started)
+
+Industry templates, business settings, and knowledge/FAQ management.
+Awaiting approval before starting.

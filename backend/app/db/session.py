@@ -37,13 +37,23 @@ def get_session_factory() -> sessionmaker | None:
 
 
 def get_db() -> Generator[Session, None, None]:
-    """FastAPI dependency yielding a scoped DB session. Not used by any route yet."""
+    """FastAPI dependency yielding a request-scoped DB session.
+
+    Commits once, only if the request handler completes without raising —
+    this is what makes multi-step operations like registration (create user +
+    tenant + membership) atomic: any exception anywhere in the request rolls
+    back everything, since nothing was committed yet.
+    """
     factory = get_session_factory()
     if factory is None:
         raise RuntimeError("Database is not configured (DATABASE_URL is not set).")
     db = factory()
     try:
         yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 

@@ -18,7 +18,7 @@ docs/      Architecture, API, security, progress documentation
 scripts/   Safe local-dev and verification scripts
 ```
 
-## Backend structure (Phase 1)
+## Backend structure (Phase 2)
 
 ```
 backend/app/
@@ -26,20 +26,33 @@ backend/app/
   config.py          Environment-driven Settings (pydantic-settings)
   logging_config.py  Structured (JSON) logging setup
   db/
-    base.py          Shared SQLAlchemy declarative Base (no models yet)
-    session.py        Engine/session management + check_database_connection()
-  api/v1/
-    router.py         Aggregates all v1 routers
-    health.py          GET /health (also mounted at /api/v1/health)
+    base.py          Shared SQLAlchemy declarative Base
+    session.py       Engine/session management, commit-on-success/
+                      rollback-on-exception per request, check_database_connection()
+  models/            User, Tenant, TenantMember, RefreshToken (+ mixins, enums)
+  repositories/      Plain (User, Tenant, TenantMember) and tenant-scoped
+                      (TenantScopedRepository + TenantMemberScopedRepository)
+  services/          auth_service.py, tenant_service.py — business logic,
+                      independent of FastAPI/HTTP concerns
+  api/
+    deps.py          get_current_user, get_tenant_context, require_tenant_role
+    cookies.py       set_auth_cookies / clear_auth_cookies
+    v1/
+      router.py      Aggregates all v1 routers
+      health.py      GET /health (also mounted at /api/v1/health)
+      auth.py        register/login/refresh/logout/me
+      tenants.py     tenant CRUD + membership listing
   core/
-    errors.py          Central exception handlers (consistent error shape)
-  schemas/
-    health.py           Pydantic response models for the health endpoint
+    errors.py        Central exception handlers (consistent error shape)
+    security.py      Argon2 hashing, JWT encode/decode, refresh-token generation
+    csrf.py           Double-submit CSRF dependency
+    normalization.py  Email normalization
+  schemas/           Pydantic request/response models (health, user, auth, tenant)
 ```
 
-No tenant, auth, or industry-template models exist yet — those are Phase 2/3
-deliverables. `app/db/base.py` and the Alembic foundation exist now so those
-phases only need to add model modules and run `alembic revision --autogenerate`.
+Industry-template models are still Phase 3. `app/db/base.py` and the
+Alembic foundation from Phase 1 are exactly what Phase 2's models plugged
+into — no earlier scaffolding needed to change.
 
 ## Database connectivity model
 
@@ -55,15 +68,16 @@ database is either connected or simply not configured yet, and
 `status: "degraded"` only when it's configured but unreachable — so the
 service never crashes or 500s because the database is temporarily down.
 
-## Authentication (planned for Phase 2 — not implemented yet)
+## Authentication (implemented — Phase 2)
 
-Per approved Decision 1: secure email/password auth, Argon2 password hashing,
-short-lived access tokens with a separate secure refresh-token flow, and
-tenant membership + role enforcement (`owner`, `admin`, `member`). No
-magic-link or OAuth in the MVP. The auth module will be isolated behind a
-clear interface (`app/core/security.py` + a dedicated `auth` service) so it
-can later be swapped for shared AI Business Engine authentication without
-touching the rest of the application.
+Secure email/password auth: Argon2id password hashing, short-lived JWT
+access tokens (in-memory on the frontend, never `localStorage`), rotating
+opaque refresh tokens (`HttpOnly` cookie) with reuse detection, and tenant
+membership + role enforcement (`owner`, `admin`, `member`). No magic-link or
+OAuth in the MVP. The auth module is isolated behind three replaceable seams
+(token issuance, user storage, session mechanics) so it can later be
+swapped for shared AI Business Engine authentication without touching
+tenant/permission logic. Full detail: `docs/security.md`.
 
 ## Integration secrets (deferred to Phase 8)
 
@@ -74,14 +88,16 @@ Phase 8 ships:** integration credentials must be encrypted at rest (e.g. via
 an application-level envelope key or a secrets manager) — never plaintext in
 the database, never placeholder values checked into config.
 
-## Tenant isolation model (Phase 2+)
+## Tenant isolation model (implemented — Phase 2)
 
-Every tenant-owned table will carry `tenant_id`, and all reads/writes will go
-through a tenant-scoped repository layer that injects the `tenant_id` filter
-server-side — never trusted from client input. Automated cross-tenant
-isolation tests will run as part of the standard verification suite from
-Phase 2 onward. See the Phase 0 plan for the full entity list and API/route
-plan.
+`Tenant` and `TenantMember` exist now; every future tenant-owned table will
+carry `tenant_id` and go through `TenantScopedRepository`
+(`app/repositories/base.py`), which filters every query by a `tenant_id`
+that can only come from a trusted, server-resolved `TenantContext` — never
+from client input. Automated cross-tenant isolation tests run at both the
+HTTP layer and the repository layer directly (`backend/tests/tenant_isolation/`)
+and are part of the standard verification suite from Phase 2 onward. See
+`docs/security.md` and `docs/database-schema.md` for detail.
 
 ## AI provider abstraction (Phase 4+)
 

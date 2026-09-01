@@ -12,9 +12,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     """Central error handling: every error response uses one consistent shape."""
 
     @app.exception_handler(StarletteHTTPException)
-    async def http_exception_handler(
-        request: Request, exc: StarletteHTTPException
-    ) -> JSONResponse:
+    async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
         return JSONResponse(
             status_code=exc.status_code,
             content={"error": {"message": exc.detail, "status_code": exc.status_code}},

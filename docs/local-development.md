@@ -35,7 +35,9 @@ Verify: `curl http://localhost:8000/health` and
 
 Leave `DATABASE_URL` unset in `backend/.env` to run without a database — the
 health endpoint reports `"database": {"status": "not_configured"}` and the
-overall service status stays `"ok"`.
+overall service status stays `"ok"`. **From Phase 2 onward, auth and tenant
+endpoints require a real database** — only `/health` and `/api/v1/health`
+work without one.
 
 To connect a real database, set:
 
@@ -45,11 +47,43 @@ DATABASE_URL=postgresql+psycopg://<user>:<password>@localhost:5432/<database>
 
 using credentials for a PostgreSQL instance you control (e.g. `sudo -u
 postgres createuser` / `createdb` on your own machine, or a role you already
-have). This project never ships or assumes a default password.
+have). This project never ships or assumes a default password. **If your
+password contains special characters** (`@ : / ? # %`), percent-encode them
+in the URL (`@` → `%40`, etc.) — an unencoded `@` in particular will silently
+corrupt host parsing rather than fail loudly.
 
-### Redis (optional in Phase 1)
+Then apply migrations (see "Database migrations" below) before using any
+auth/tenant endpoint.
 
-`REDIS_URL` is not read by any Phase 1 code path. The backend and its health
+### Authentication configuration
+
+Generate a signing secret and set it directly in the ignored `backend/.env`
+— never paste it into chat, a commit, or any other tracked file:
+
+```bash
+python3 -c "import secrets; print('JWT_SECRET_KEY=' + secrets.token_urlsafe(64))" >> backend/.env
+```
+
+`JWT_ISSUER`, `JWT_AUDIENCE`, `ACCESS_TOKEN_TTL_MINUTES`,
+`REFRESH_TOKEN_TTL_DAYS`, `COOKIE_SECURE`, `COOKIE_SAMESITE`,
+`REFRESH_COOKIE_NAME`, `CSRF_COOKIE_NAME` all have sensible defaults (see
+`.env.example`) and don't need to be set for local development.
+
+### Database migrations
+
+```bash
+cd backend
+.venv/bin/python -m alembic current      # what's currently applied
+.venv/bin/python -m alembic upgrade head # apply pending migrations
+```
+
+Never run migrations against anything but your own dedicated development
+database. See `docs/database-schema.md` for the reviewed migration's
+contents and the enum-handling gotchas it works around.
+
+### Redis (optional through Phase 2)
+
+`REDIS_URL` is not read by any code path yet. The backend and its health
 checks run correctly with no Redis installed or configured. Redis becomes
 relevant starting Phase 4/5 (rate limiting, SSE pub/sub, caching).
 
@@ -86,4 +120,11 @@ placeholder export and Phase 5 plan.
 ```
 
 Runs backend pytest/ruff/mypy, frontend eslint/tsc/build, and widget
-eslint/tsc/build in sequence.
+eslint/tsc/build in sequence. **From Phase 2 onward, `pytest` requires a
+real database** configured and migrated (see above) — auth/tenant/
+tenant-isolation tests use it directly, wrapped in a rolled-back transaction
+per test (see `backend/tests/conftest.py`), and refuse to run at all against
+any database whose name isn't `ai_receptionist_dev`.
+
+Health-only tests (`backend/tests/test_health.py`) still work with no
+database configured at all, preserving the Phase 1 guarantee.

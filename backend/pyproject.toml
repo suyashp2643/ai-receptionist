@@ -5,6 +5,9 @@ src = ["app", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+# B008 (function call in argument default) is standard, required FastAPI
+# style for Depends()/Path()/etc. in route and dependency signatures.
+ignore = ["B008"]
 
 [tool.mypy]
 python_version = "3.12"
