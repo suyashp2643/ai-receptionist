@@ -16,9 +16,15 @@ export function getAccessToken(): string | null {
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** The raw `error` object from the response body, when present — lets
+   * callers read structured extras (e.g. `requirements` on a failed
+   * complete-onboarding call) beyond the plain `message` string. */
+  details: Record<string, unknown> | null;
+
+  constructor(status: number, message: string, details: Record<string, unknown> | null = null) {
     super(message);
     this.status = status;
+    this.details = details;
   }
 }
 
@@ -43,12 +49,13 @@ async function rawRequest(path: string, options: RequestInit = {}): Promise<Resp
   });
 }
 
-async function readErrorMessage(response: Response): Promise<string> {
+async function readError(response: Response): Promise<{ message: string; details: Record<string, unknown> | null }> {
   try {
     const body = await response.json();
-    return body?.error?.message ?? `Request failed with status ${response.status}`;
+    const message = body?.error?.message ?? `Request failed with status ${response.status}`;
+    return { message: typeof message === "string" ? message : JSON.stringify(message), details: body?.error ?? null };
   } catch {
-    return `Request failed with status ${response.status}`;
+    return { message: `Request failed with status ${response.status}`, details: null };
   }
 }
 
@@ -82,7 +89,8 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
   }
 
   if (!response.ok) {
-    throw new ApiError(response.status, await readErrorMessage(response));
+    const { message, details } = await readError(response);
+    throw new ApiError(response.status, message, details);
   }
   if (response.status === 204) {
     return undefined as T;

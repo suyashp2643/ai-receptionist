@@ -5,7 +5,7 @@ industry templates (real estate, clinics, hotels, restaurants, automotive,
 law firms, education, home services, SaaS, custom) configure it via data,
 not forked code.
 
-Status: **Phase 2 — authentication & multi-tenancy**. See
+Status: **Phase 3 — industry templates & onboarding**. See
 [docs/PROGRESS.md](docs/PROGRESS.md) for what's implemented so far,
 [docs/architecture.md](docs/architecture.md) for the system design, and
 [docs/security.md](docs/security.md) for the auth/tenant-isolation model.
@@ -18,6 +18,8 @@ Status: **Phase 2 — authentication & multi-tenancy**. See
 - Database: PostgreSQL (required from Phase 2 for auth/tenant endpoints; optional for `/health`)
 - Cache/queue: Redis (optional; not required until later phases)
 - Widget: embeddable TypeScript package (foundation only so far)
+- Zero-cost by design through Phase 3: no paid APIs, no external embeddings — deterministic
+  local chunking + PostgreSQL full-text search for knowledge
 
 ## Repository layout
 
@@ -58,7 +60,23 @@ npm run dev
 ```
 
 Then open http://localhost:3000 — the home page shows live backend health,
-and you can register a workspace at `/register` or log in at `/login`.
+and you can register a workspace at `/register` or log in at `/login`. A
+new workspace walks through onboarding at `/onboarding/business` before
+reaching the dashboard.
+
+Seed the global industry-template catalog (required before onboarding can
+select a template):
+
+```bash
+cd backend && .venv/bin/python scripts/seed_industry_templates.py
+```
+
+Optionally seed three fictional demo tenants for exploring the dashboard
+(development only, never run in production):
+
+```bash
+cd backend && .venv/bin/python scripts/seed_demo_data.py
+```
 
 ## Verification
 

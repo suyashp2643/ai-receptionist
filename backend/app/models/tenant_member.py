@@ -18,9 +18,7 @@ class TenantMember(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """
 
     __tablename__ = "tenant_members"
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "user_id", name="uq_tenant_members_tenant_user"),
-    )
+    __table_args__ = (UniqueConstraint("tenant_id", "user_id", name="uq_tenant_members_tenant_user"),)
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -57,7 +55,4 @@ class TenantMember(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     def __repr__(self) -> str:
-        return (
-            f"TenantMember(tenant_id={self.tenant_id!r}, user_id={self.user_id!r}, "
-            f"role={self.role!r})"
-        )
+        return f"TenantMember(tenant_id={self.tenant_id!r}, user_id={self.user_id!r}, " f"role={self.role!r})"

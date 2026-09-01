@@ -35,6 +35,13 @@ class TenantScopedRepository(Generic[ModelT]):
         self.db = db
         self.tenant_id = tenant_id
 
+    def add(self, obj: ModelT) -> ModelT:
+        """Caller is responsible for having set obj.tenant_id == self.tenant_id
+        before calling this — it does not stamp it automatically, so that
+        assignment stays visible at the call site rather than implicit here."""
+        self.db.add(obj)
+        return obj
+
     def get(self, resource_id: uuid.UUID) -> ModelT | None:
         # mypy can't see through the Protocol bound that `.id`/`.tenant_id`
         # are SQLAlchemy InstrumentedAttributes (whose `==` returns a

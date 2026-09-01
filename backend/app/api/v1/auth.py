@@ -41,9 +41,7 @@ def register(
     try:
         user, _tenant, _member, session = auth_service.register_user(db, settings, payload)
     except auth_service.EmailAlreadyRegisteredError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="Email is already registered."
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email is already registered.") from exc
 
     set_auth_cookies(
         response,
@@ -72,9 +70,7 @@ def login(
             db, settings, normalized_email=normalize_email(payload.email), password=payload.password
         )
     except auth_service.InvalidCredentialsError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password."
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password.") from exc
 
     set_auth_cookies(
         response,
@@ -117,9 +113,7 @@ def refresh(
         return _unauthenticated_and_cleared()
 
     try:
-        user, session = auth_service.refresh_session(
-            db, settings, raw_refresh_token=raw_refresh_token
-        )
+        user, session = auth_service.refresh_session(db, settings, raw_refresh_token=raw_refresh_token)
     except (auth_service.RefreshTokenInvalidError, auth_service.RefreshTokenReuseDetectedError):
         return _unauthenticated_and_cleared()
 
@@ -139,9 +133,7 @@ def refresh(
     )
 
 
-@router.post(
-    "/auth/logout", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(verify_csrf)]
-)
+@router.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(verify_csrf)])
 def logout(
     request: Request,
     response: Response,

@@ -20,9 +20,7 @@ class TenantMemberRepository:
         self.db = db
 
     def get_membership(self, *, tenant_id: uuid.UUID, user_id: uuid.UUID) -> TenantMember | None:
-        stmt = select(TenantMember).where(
-            TenantMember.tenant_id == tenant_id, TenantMember.user_id == user_id
-        )
+        stmt = select(TenantMember).where(TenantMember.tenant_id == tenant_id, TenantMember.user_id == user_id)
         return self.db.scalars(stmt).first()
 
     def list_for_user(self, user_id: uuid.UUID) -> list[TenantMember]:

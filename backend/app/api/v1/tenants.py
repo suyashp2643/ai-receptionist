@@ -31,9 +31,7 @@ def create_tenant(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> TenantRead:
-    tenant, member = create_tenant_with_owner(
-        db, user_id=current_user.id, name=payload.name, timezone=payload.timezone
-    )
+    tenant, member = create_tenant_with_owner(db, user_id=current_user.id, name=payload.name, timezone=payload.timezone)
     return TenantRead(
         id=tenant.id,
         name=tenant.name,

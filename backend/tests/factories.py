@@ -6,6 +6,8 @@ from app.models.enums import TenantMemberRole, TenantMemberStatus
 from app.models.tenant import Tenant
 from app.models.tenant_member import TenantMember
 from app.models.user import User
+from app.schemas.receptionist import ReceptionistCreate
+from app.services.receptionist_service import create_receptionist
 from sqlalchemy.orm import Session
 
 
@@ -28,9 +30,7 @@ def make_user(
 
 
 def make_tenant(db: Session, *, name: str = "Test Tenant") -> Tenant:
-    tenant = Tenant(
-        name=name, slug=f"{name.lower().replace(' ', '-')}-{uuid.uuid4().hex[:6]}", timezone="UTC"
-    )
+    tenant = Tenant(name=name, slug=f"{name.lower().replace(' ', '-')}-{uuid.uuid4().hex[:6]}", timezone="UTC")
     db.add(tenant)
     db.flush()
     return tenant
@@ -39,9 +39,7 @@ def make_tenant(db: Session, *, name: str = "Test Tenant") -> Tenant:
 def add_member(
     db: Session, *, tenant: Tenant, user: User, role: TenantMemberRole = TenantMemberRole.MEMBER
 ) -> TenantMember:
-    member = TenantMember(
-        tenant_id=tenant.id, user_id=user.id, role=role, status=TenantMemberStatus.ACTIVE
-    )
+    member = TenantMember(tenant_id=tenant.id, user_id=user.id, role=role, status=TenantMemberStatus.ACTIVE)
     db.add(member)
     db.flush()
     return member
@@ -58,3 +56,10 @@ def make_tenant_with_owner(
     tenant = make_tenant(db, name=tenant_name)
     member = add_member(db, tenant=tenant, user=user, role=TenantMemberRole.OWNER)
     return tenant, user, member
+
+
+def make_receptionist(db: Session, *, tenant: Tenant, name: str = "Test Receptionist"):
+    receptionist, workflow = create_receptionist(
+        db, tenant_id=tenant.id, payload=ReceptionistCreate(name=name, welcome_message="Hello!")
+    )
+    return receptionist, workflow

@@ -54,9 +54,7 @@ class IssuedSession:
     refresh_token_id: uuid.UUID
 
 
-def _issue_session(
-    db: Session, settings: Settings, *, user: User, family_id: uuid.UUID | None
-) -> IssuedSession:
+def _issue_session(db: Session, settings: Settings, *, user: User, family_id: uuid.UUID | None) -> IssuedSession:
     family_id = family_id or uuid.uuid4()
     raw_token = generate_refresh_token()
     expires_at = datetime.now(UTC) + timedelta(days=settings.refresh_token_ttl_days)
@@ -70,9 +68,7 @@ def _issue_session(
     RefreshTokenRepository(db).add(row)
     db.flush()  # assigns row.id
 
-    access_token, expires_in = create_access_token(
-        settings=settings, user_id=user.id, session_id=family_id
-    )
+    access_token, expires_in = create_access_token(settings=settings, user_id=user.id, session_id=family_id)
 
     return IssuedSession(
         access_token=access_token,
@@ -130,18 +126,14 @@ def authenticate_user(db: Session, *, normalized_email: str, password: str) -> U
     return user
 
 
-def login_user(
-    db: Session, settings: Settings, *, normalized_email: str, password: str
-) -> tuple[User, IssuedSession]:
+def login_user(db: Session, settings: Settings, *, normalized_email: str, password: str) -> tuple[User, IssuedSession]:
     user = authenticate_user(db, normalized_email=normalized_email, password=password)
     user.last_login_at = datetime.now(UTC)
     session = _issue_session(db, settings, user=user, family_id=None)
     return user, session
 
 
-def refresh_session(
-    db: Session, settings: Settings, *, raw_refresh_token: str
-) -> tuple[User, IssuedSession]:
+def refresh_session(db: Session, settings: Settings, *, raw_refresh_token: str) -> tuple[User, IssuedSession]:
     """Rotates a refresh token. Reusing an already-rotated/revoked token
     revokes the entire family (theft/replay signal) before rejecting."""
     repo = RefreshTokenRepository(db)

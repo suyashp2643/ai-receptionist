@@ -1,16 +1,14 @@
 import uuid
-import zoneinfo
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.core.timezones import VALID_TIMEZONES
 from app.models.enums import TenantMemberRole, TenantMemberStatus, TenantStatus
-
-_VALID_TIMEZONES = zoneinfo.available_timezones()
 
 
 def _validate_timezone(value: str) -> str:
-    if value not in _VALID_TIMEZONES:
+    if value not in VALID_TIMEZONES:
         raise ValueError(f"Unknown IANA timezone: {value!r}")
     return value
 

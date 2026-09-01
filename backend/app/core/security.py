@@ -69,9 +69,7 @@ class InvalidAccessTokenError(Exception):
     pass
 
 
-def create_access_token(
-    *, settings: Settings, user_id: uuid.UUID, session_id: uuid.UUID
-) -> tuple[str, int]:
+def create_access_token(*, settings: Settings, user_id: uuid.UUID, session_id: uuid.UUID) -> tuple[str, int]:
     """Returns (token, expires_in_seconds)."""
     secret = settings.require_jwt_secret()
     now = datetime.now(UTC)

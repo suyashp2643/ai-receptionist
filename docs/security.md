@@ -124,9 +124,38 @@ route declares only the *minimum* rank it needs:
 | `GET /tenants/{id}` | any active member |
 | `PATCH /tenants/{id}` | `admin` |
 | `GET /tenants/{id}/members` | `admin` |
+| Every Phase 3 resource GET (receptionists, workflow, locations, services, FAQs, knowledge, onboarding state) | any active member |
+| Every Phase 3 resource POST/PATCH/DELETE | `admin` |
+| `GET /industry-templates*` | any authenticated user (global catalog, not tenant-scoped) |
 
 A member with insufficient role gets `403`; a non-member gets `404` (see
 above) — the two failure modes are intentionally distinct.
+
+## Mandatory safety rules (clinic, law firm)
+
+`app/core/allowlists.MANDATORY_SAFETY_RULES` maps an industry template
+`key` (`clinic`, `law_firm`) to a tuple of exact safety-rule strings that
+must always be present in that receptionist's `safety_rules`. Every `PATCH
+.../workflow` call that touches `safety_rules` is checked
+(`app/services/receptionist_service._enforce_mandatory_safety_rules`)
+against the receptionist's own `industry_template_id` — if any mandatory
+rule is missing from the submitted list, the update is rejected with `422`
+naming exactly which rule(s) would have been removed. This is enforced
+server-side on every write, not just at template-selection time, so a
+tenant cannot silently drop "no diagnosis" or "no legal advice" language
+later. Tested explicitly for both templates.
+
+## Nested cross-tenant reference validation
+
+Path-based tenant isolation (`{tenant_id}` in the URL) is necessary but not
+sufficient: a request body can also reference another resource by UUID. The
+one place this matters in Phase 3 is `Service.location_id` — a raw foreign
+key to `business_locations.id` has no knowledge of tenant boundaries, so the
+API layer explicitly re-validates that a supplied `location_id` resolves
+under the *caller's own* `TenantScopedRepository` before accepting it
+(`app/api/v1/services._validate_location_id`), returning `422 Unknown
+location_id` if it belongs to a different tenant. Tested explicitly
+(`test_service_location_id_must_belong_to_same_tenant`).
 
 ## Tenant-scoped repository
 
@@ -155,11 +184,34 @@ hidden behind a shared abstraction.
 | Wildcard credentialed origins | No — `allow_credentials=True` is only ever paired with the explicit origin list |
 | Cross-tenant access | Blocked at the dependency layer + repository layer; covered by `tests/tenant_isolation/` (HTTP and repository level) |
 | Client-controlled role escalation | Blocked — role is always read from `TenantMember`, never from the request; tested |
-| Open redirect | N/A — no redirect endpoints exist in Phase 2 |
+| Open redirect | N/A — no redirect endpoints exist |
 | JWT algorithm confusion | Mitigated — `algorithms=["HS256"]` whitelisted explicitly on every decode |
 | Long-lived access tokens | No — 15-minute default, held in memory only, never `localStorage` |
 | Refresh-token reuse | Detected and mitigated — whole family revoked on reuse |
 | Real credentials in tracked files | No — verified via `git ls-files` + content grep before every commit; see `docs/PROGRESS.md` |
+| Stored/reflected script injection | Blocked — every tenant-authored text field (FAQ, knowledge, welcome message, qualification labels, safety rules, etc.) rejects any `<`/`>` character outright (`app/core/text_safety.reject_html`); no HTML sanitizer library needed since no markup is ever allowed |
+| Arbitrary field expressions / `eval` | None exist — qualification rules are a closed set of declarative types (`app/core/allowlists.QUALIFICATION_RULE_TYPES`); no expression language, no `eval`, anywhere in the codebase |
+| SQL constructed from tenant input | No raw string-built SQL exists; the one place a Postgres-specific operator is used (full-text search's `@@`) goes through SQLAlchemy's `func`/`.op()` expression builder with bound parameters, not string interpolation |
+| Global-template mutation by tenants | No API route exists to create/update/delete an `IndustryTemplate` at all — tested (`test_no_api_route_exists_to_mutate_templates` asserts `405`) |
+| Cross-tenant deterministic search leakage | No — every full-text search query is filtered by `tenant_id` before ranking; tested with two tenants sharing a search term |
+| Input size limits | Yes — every text field has an explicit max length (`app/core/text_safety.py` constants); knowledge documents capped at 200,000 characters |
+| JSON nesting/collection size bounds | Yes — qualification schemas capped at 40 fields, 30 options per select field, 40 rules; safety rules capped at 40 entries; workflow stages capped at 20 |
+| Deletion behavior | Deliberate and tested — deleting a knowledge document explicitly deletes its chunks first (`knowledge_service.delete_document`); deleting a location/service/FAQ is a plain tenant-scoped delete, verified to 404 afterward |
+
+**Bug found and fixed during Phase 3 testing (not a test bug):** the
+central `RequestValidationError` handler (`app/core/errors.py`, written in
+Phase 1) passed `exc.errors()` straight into a plain `JSONResponse`. Any
+custom `@field_validator` that raises a plain `ValueError` (used throughout
+Phase 3 — unknown action, overlapping working hours, HTML rejection, etc.)
+produces a Pydantic error entry containing the raw exception object in
+`ctx["error"]`, which `json.dumps` cannot serialize — plain `JSONResponse`
+does **not** run its content through `jsonable_encoder` the way FastAPI's
+own default handler does. The handler itself crashed instead of returning a
+clean `422`. Fixed by wrapping `exc.errors()` in `jsonable_encoder(...)`.
+This went undetected through Phase 1 and 2 because neither phase had a test
+that triggered a *custom* validator's `ValueError` and asserted on the `422`
+response — built-in Pydantic constraints (e.g. `Field(min_length=...)`)
+don't hit this path.
 
 ## How shared AI Business Engine authentication could replace this later
 

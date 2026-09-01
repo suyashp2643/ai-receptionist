@@ -1,8 +1,31 @@
 """Import every model module here so Base.metadata sees all tables for Alembic."""
 
+from app.models.business_location import BusinessLocation
+from app.models.business_profile import BusinessProfile
+from app.models.faq import FAQ
+from app.models.industry_template import IndustryTemplate
+from app.models.knowledge import KnowledgeChunk, KnowledgeDocument, KnowledgeSource
+from app.models.receptionist import Receptionist
+from app.models.receptionist_workflow import ReceptionistWorkflow
 from app.models.refresh_token import RefreshToken
+from app.models.service import Service
 from app.models.tenant import Tenant
 from app.models.tenant_member import TenantMember
 from app.models.user import User
 
-__all__ = ["User", "Tenant", "TenantMember", "RefreshToken"]
+__all__ = [
+    "User",
+    "Tenant",
+    "TenantMember",
+    "RefreshToken",
+    "IndustryTemplate",
+    "BusinessProfile",
+    "Receptionist",
+    "ReceptionistWorkflow",
+    "BusinessLocation",
+    "Service",
+    "FAQ",
+    "KnowledgeSource",
+    "KnowledgeDocument",
+    "KnowledgeChunk",
+]

@@ -1,11 +1,11 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/lib/auth-context";
 import { ApiError } from "@/lib/api";
-import { detectBrowserTimezone, getSupportedTimezones } from "@/lib/timezones";
+import { resolveDefaultTimezone, useTimezoneOptions } from "@/lib/timezones";
 
 export default function RegisterPage() {
   const { register } = useAuth();
@@ -15,11 +15,26 @@ export default function RegisterPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [workspaceName, setWorkspaceName] = useState("");
-  const [timezone, setTimezone] = useState(() => detectBrowserTimezone());
+  const [timezone, setTimezone] = useState("UTC");
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const timezones = getSupportedTimezones();
+  const { timezones, isLoading: timezonesLoading } = useTimezoneOptions();
+
+  // Auto-select the browser's detected timezone (normalized if it's a known
+  // legacy alias, e.g. Asia/Calcutta -> Asia/Kolkata) exactly once, as soon
+  // as the backend-valid list has loaded — never before, since we can't
+  // confirm the detected zone is actually acceptable until then. Guarded by
+  // a ref rather than depending on `timezones` so this can't re-fire and
+  // clobber a value the user has since picked themselves.
+  const hasSetDefaultTimezone = useRef(false);
+  useEffect(() => {
+    if (!timezonesLoading && !hasSetDefaultTimezone.current) {
+      hasSetDefaultTimezone.current = true;
+      setTimezone(resolveDefaultTimezone(timezones));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timezonesLoading]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

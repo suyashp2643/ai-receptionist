@@ -11,9 +11,7 @@ from sqlalchemy.orm import Session
 settings = get_settings()
 
 
-def _register(
-    client: TestClient, *, email: str | None = None, password: str = "correct horse battery staple"
-):
+def _register(client: TestClient, *, email: str | None = None, password: str = "correct horse battery staple"):
     email = email or f"user-{uuid.uuid4().hex[:10]}@example.com"
     return client.post(
         "/api/v1/auth/register",
@@ -56,9 +54,7 @@ def test_registration_creates_user_tenant_and_owner_membership_atomically(
     user = db_session.scalars(select(User).where(User.normalized_email == email.lower())).first()
     assert user is not None
 
-    memberships = db_session.scalars(
-        select(TenantMember).where(TenantMember.user_id == user.id)
-    ).all()
+    memberships = db_session.scalars(select(TenantMember).where(TenantMember.user_id == user.id)).all()
     assert len(memberships) == 1
     assert memberships[0].role.value == "owner"
     assert str(memberships[0].tenant_id) == body["memberships"][0]["tenant_id"]
@@ -83,9 +79,7 @@ def test_login_succeeds_and_updates_last_login(db_backed_client: TestClient, db_
 
 def test_login_invalid_credentials_generic_error_wrong_password(db_backed_client: TestClient):
     _, email = _register(db_backed_client, password="correct horse battery staple")
-    response = db_backed_client.post(
-        "/api/v1/auth/login", json={"email": email, "password": "totally wrong password"}
-    )
+    response = db_backed_client.post("/api/v1/auth/login", json={"email": email, "password": "totally wrong password"})
     assert response.status_code == 401
     assert response.json()["error"]["message"] == "Invalid email or password."
 
@@ -115,9 +109,7 @@ def test_me_requires_valid_access_token(db_backed_client: TestClient):
     response = db_backed_client.get("/api/v1/auth/me")
     assert response.status_code == 401
 
-    response = db_backed_client.get(
-        "/api/v1/auth/me", headers={"Authorization": "Bearer not-a-real-token"}
-    )
+    response = db_backed_client.get("/api/v1/auth/me", headers={"Authorization": "Bearer not-a-real-token"})
     assert response.status_code == 401
 
 
@@ -125,9 +117,7 @@ def test_me_succeeds_with_valid_access_token(db_backed_client: TestClient):
     register_response, email = _register(db_backed_client)
     access_token = register_response.json()["access_token"]
 
-    response = db_backed_client.get(
-        "/api/v1/auth/me", headers={"Authorization": f"Bearer {access_token}"}
-    )
+    response = db_backed_client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {access_token}"})
     assert response.status_code == 200
     assert response.json()["user"]["normalized_email"] == email.lower()
 
@@ -138,29 +128,28 @@ def test_refresh_without_csrf_header_rejected(db_backed_client: TestClient):
     assert response.status_code == 403
 
 
-def test_refresh_rotation_succeeds_and_old_token_becomes_unusable(
-    db_backed_client: TestClient, db_session: Session
-):
-    _register(db_backed_client)
+def test_refresh_rotation_succeeds_and_old_token_becomes_unusable(db_backed_client: TestClient, db_session: Session):
+    register_response, _email = _register(db_backed_client)
+    user_id = register_response.json()["user"]["id"]
     old_refresh_cookie = db_backed_client.cookies.get(settings.refresh_cookie_name)
 
-    response = db_backed_client.post(
-        "/api/v1/auth/refresh", headers=_csrf_headers(db_backed_client)
-    )
+    response = db_backed_client.post("/api/v1/auth/refresh", headers=_csrf_headers(db_backed_client))
     assert response.status_code == 200
     new_refresh_cookie = db_backed_client.cookies.get(settings.refresh_cookie_name)
     assert new_refresh_cookie != old_refresh_cookie
 
-    tokens = db_session.scalars(select(RefreshToken)).all()
+    # Scoped to this test's own user — an unscoped SELECT would also pick up
+    # any other data present in the shared dev database (e.g. demo seed rows).
+    tokens = db_session.scalars(select(RefreshToken).where(RefreshToken.user_id == user_id)).all()
+    assert len(tokens) == 2
     old_token_rows = [t for t in tokens if t.revoked_at is not None]
     assert len(old_token_rows) == 1
     assert old_token_rows[0].replaced_by_token_id is not None
 
 
-def test_refresh_token_reuse_revokes_entire_family(
-    db_backed_client: TestClient, db_session: Session
-):
-    _register(db_backed_client)
+def test_refresh_token_reuse_revokes_entire_family(db_backed_client: TestClient, db_session: Session):
+    register_response, _email = _register(db_backed_client)
+    user_id = register_response.json()["user"]["id"]
     csrf = _csrf_headers(db_backed_client)
     original_refresh_cookie = db_backed_client.cookies.get(settings.refresh_cookie_name)
 
@@ -188,7 +177,8 @@ def test_refresh_token_reuse_revokes_entire_family(
     # client's CSRF cookie has also been cleared (correctly — reuse detection
     # invalidates the whole session) which would make a third HTTP call fail
     # on CSRF grounds rather than exercising the claim being tested here.
-    all_tokens = db_session.scalars(select(RefreshToken)).all()
+    # Scoped to this test's own user — see note in the rotation test above.
+    all_tokens = db_session.scalars(select(RefreshToken).where(RefreshToken.user_id == user_id)).all()
     assert len(all_tokens) == 2
     assert all(t.revoked_at is not None for t in all_tokens)
 

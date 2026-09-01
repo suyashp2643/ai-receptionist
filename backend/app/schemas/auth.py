@@ -1,12 +1,9 @@
-import zoneinfo
-
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from app.core.security import MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH
+from app.core.timezones import VALID_TIMEZONES
 from app.schemas.tenant import TenantMembershipSummary
 from app.schemas.user import UserPublic
-
-_VALID_TIMEZONES = zoneinfo.available_timezones()
 
 
 class RegisterRequest(BaseModel):
@@ -19,7 +16,7 @@ class RegisterRequest(BaseModel):
     @field_validator("timezone")
     @classmethod
     def _tz(cls, v: str) -> str:
-        if v not in _VALID_TIMEZONES:
+        if v not in VALID_TIMEZONES:
             raise ValueError(f"Unknown IANA timezone: {v!r}")
         return v
 

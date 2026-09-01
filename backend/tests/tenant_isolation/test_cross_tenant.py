@@ -23,9 +23,7 @@ class TestHttpLevelIsolation:
         _tenant_a, owner_a, _ = make_tenant_with_owner(db_session, tenant_name="Tenant A")
         tenant_b, _owner_b, _ = make_tenant_with_owner(db_session, tenant_name="Tenant B")
 
-        response = db_backed_client.get(
-            f"/api/v1/tenants/{tenant_b.id}", headers=_auth_headers_for(owner_a)
-        )
+        response = db_backed_client.get(f"/api/v1/tenants/{tenant_b.id}", headers=_auth_headers_for(owner_a))
         assert response.status_code == 404
 
     def test_cannot_update_other_tenant(self, db_backed_client: TestClient, db_session: Session):
@@ -39,20 +37,14 @@ class TestHttpLevelIsolation:
         )
         assert response.status_code == 404
 
-    def test_cannot_list_other_tenant_members(
-        self, db_backed_client: TestClient, db_session: Session
-    ):
+    def test_cannot_list_other_tenant_members(self, db_backed_client: TestClient, db_session: Session):
         _tenant_a, owner_a, _ = make_tenant_with_owner(db_session, tenant_name="Tenant A")
         tenant_b, _owner_b, _ = make_tenant_with_owner(db_session, tenant_name="Tenant B")
 
-        response = db_backed_client.get(
-            f"/api/v1/tenants/{tenant_b.id}/members", headers=_auth_headers_for(owner_a)
-        )
+        response = db_backed_client.get(f"/api/v1/tenants/{tenant_b.id}/members", headers=_auth_headers_for(owner_a))
         assert response.status_code == 404
 
-    def test_update_does_not_leak_via_side_channel(
-        self, db_backed_client: TestClient, db_session: Session
-    ):
+    def test_update_does_not_leak_via_side_channel(self, db_backed_client: TestClient, db_session: Session):
         """A failed cross-tenant update must not have mutated anything."""
         _tenant_a, owner_a, _ = make_tenant_with_owner(db_session, tenant_name="Tenant A")
         tenant_b, owner_b, _ = make_tenant_with_owner(db_session, tenant_name="Tenant B Original")
@@ -64,9 +56,7 @@ class TestHttpLevelIsolation:
         )
 
         # Owner B's own read must still show the untouched name.
-        confirm = db_backed_client.get(
-            f"/api/v1/tenants/{tenant_b.id}", headers=_auth_headers_for(owner_b)
-        )
+        confirm = db_backed_client.get(f"/api/v1/tenants/{tenant_b.id}", headers=_auth_headers_for(owner_b))
         assert confirm.json()["name"] == "Tenant B Original"
 
 
@@ -83,9 +73,7 @@ class TestRepositoryLevelIsolation:
         assert len(results) == 1
         assert results[0].id == member_a.id
 
-    def test_scoped_repository_get_returns_none_for_other_tenants_resource(
-        self, db_session: Session
-    ):
+    def test_scoped_repository_get_returns_none_for_other_tenants_resource(self, db_session: Session):
         tenant_a, _owner_a, _member_a = make_tenant_with_owner(db_session, tenant_name="Tenant A")
         _tenant_b, _owner_b, member_b = make_tenant_with_owner(db_session, tenant_name="Tenant B")
 

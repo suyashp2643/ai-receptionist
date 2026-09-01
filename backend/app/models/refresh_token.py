@@ -35,12 +35,8 @@ class RefreshToken(UUIDPrimaryKeyMixin, Base):
     replaced_by_token_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("refresh_tokens.id", ondelete="SET NULL")
     )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     def __repr__(self) -> str:  # never include token_hash's origin token
-        return (
-            f"RefreshToken(id={self.id!r}, family_id={self.family_id!r}, user_id={self.user_id!r})"
-        )
+        return f"RefreshToken(id={self.id!r}, family_id={self.family_id!r}, user_id={self.user_id!r})"

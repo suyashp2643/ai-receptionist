@@ -78,10 +78,34 @@ cd backend
 ```
 
 Never run migrations against anything but your own dedicated development
-database. See `docs/database-schema.md` for the reviewed migration's
-contents and the enum-handling gotchas it works around.
+database. See `docs/database-schema.md` for the reviewed migrations'
+contents and the enum-handling gotchas they work around.
 
-### Redis (optional through Phase 2)
+### Seed data
+
+Seed the global industry-template catalog — required before onboarding can
+select a template (idempotent, safe to re-run):
+
+```bash
+cd backend
+.venv/bin/python scripts/seed_industry_templates.py
+```
+
+Optionally, seed three fictional demo tenants (a real estate agency, a
+dental clinic, a boutique hotel) fully onboarded with a location, services,
+an FAQ, and a knowledge document each — **development only**, refuses to
+run unless `ENVIRONMENT=development`, idempotent:
+
+```bash
+cd backend
+.venv/bin/python scripts/seed_demo_data.py
+```
+
+This prints a freshly generated one-time password per demo user directly to
+your terminal — it is never written to any file or tracked document, so
+save it if you want to log in as that demo tenant.
+
+### Redis (optional through Phase 3)
 
 `REDIS_URL` is not read by any code path yet. The backend and its health
 checks run correctly with no Redis installed or configured. Redis becomes
