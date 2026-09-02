@@ -1,7 +1,7 @@
 import uuid
 
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy import ForeignKey, Integer, String
+from sqlalchemy import ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -17,6 +17,14 @@ class Receptionist(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     supported by this schema even though onboarding only creates one."""
 
     __tablename__ = "receptionists"
+    __table_args__ = (
+        # `id` is already globally unique on its own, so this adds no new
+        # constraint on the data — it exists so Phase 4's `conversations`
+        # table can declare a composite foreign key on
+        # (tenant_id, receptionist_id), guaranteeing at the database level
+        # that a conversation's receptionist belongs to the same tenant.
+        UniqueConstraint("tenant_id", "id", name="uq_receptionists_tenant_id_id"),
+    )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),

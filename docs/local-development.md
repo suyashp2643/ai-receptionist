@@ -65,7 +65,9 @@ python3 -c "import secrets; print('JWT_SECRET_KEY=' + secrets.token_urlsafe(64))
 ```
 
 `JWT_ISSUER`, `JWT_AUDIENCE`, `ACCESS_TOKEN_TTL_MINUTES`,
-`REFRESH_TOKEN_TTL_DAYS`, `COOKIE_SECURE`, `COOKIE_SAMESITE`,
+`JWT_CLOCK_SKEW_LEEWAY_SECONDS` (see docs/security.md's "Clock-skew leeway"
+section — matters more in a VM-based dev environment like WSL2 than on
+bare metal), `REFRESH_TOKEN_TTL_DAYS`, `COOKIE_SECURE`, `COOKIE_SAMESITE`,
 `REFRESH_COOKIE_NAME`, `CSRF_COOKIE_NAME` all have sensible defaults (see
 `.env.example`) and don't need to be set for local development.
 
@@ -105,11 +107,46 @@ This prints a freshly generated one-time password per demo user directly to
 your terminal — it is never written to any file or tracked document, so
 save it if you want to log in as that demo tenant.
 
-### Redis (optional through Phase 3)
+### Redis (still optional through Phase 4)
 
-`REDIS_URL` is not read by any code path yet. The backend and its health
-checks run correctly with no Redis installed or configured. Redis becomes
-relevant starting Phase 4/5 (rate limiting, SSE pub/sub, caching).
+`REDIS_URL` is not read by any code path yet — Phase 4's SSE streaming is a
+single synchronous per-request generator, not a pub/sub fan-out, so it
+needed no Redis either. The backend and its health checks run correctly
+with no Redis installed or configured.
+
+### AI provider configuration (Phase 4)
+
+`AI_PROVIDER=mock` (the default — leaving it unset also means mock) requires
+**no API key, no network access, and no cost**. Every automated test, the
+private test console, and this whole phase's demos run entirely on it.
+`OPENAI_API_KEY`/`ANTHROPIC_API_KEY` are optional placeholders in
+`.env.example` for a later phase — setting `AI_PROVIDER=openai` or
+`AI_PROVIDER=anthropic` without the matching key produces a clear
+`ProviderConfigurationError` at startup/request time rather than a silent
+fallback or an attempted call with an empty key. Do not set a real key in
+any tracked file; `backend/.env` is gitignored for exactly this reason.
+
+`AI_PROVIDER_TIMEOUT_SECONDS`, `MAX_CONVERSATION_MESSAGE_LENGTH`,
+`MAX_CONVERSATION_CONTEXT_CHARS`, `RETRIEVAL_RESULT_LIMIT`, and
+`SSE_HEARTBEAT_SECONDS` all have sensible defaults (see `.env.example`) and
+don't need to be set for local development.
+
+### Using the private test console
+
+1. Complete onboarding for a tenant (business profile + at least one active
+   FAQ or knowledge document + an active receptionist) — the dashboard's
+   "Finish setting up your receptionist" prompt links directly to whatever
+   step is still incomplete.
+2. From the dashboard, open **"Open the private test console (mock AI
+   demonstration)"** (`/dashboard/receptionist/test`).
+3. Pick a receptionist and click **Start new conversation** — this is real,
+   persisted backend data (not a frontend-only mock transcript). Send
+   messages, watch qualification/citations/tool-activity/safety panels
+   update live, and use **Complete conversation** to generate and view the
+   stored summary. **Reload an existing test conversation** restores any
+   past conversation's full transcript and summary from the database.
+4. There is no public-facing equivalent yet — this route requires an
+   authenticated tenant member and is not the Phase 5+ embeddable widget.
 
 ## 2. Frontend
 
@@ -152,3 +189,47 @@ any database whose name isn't `ai_receptionist_dev`.
 
 Health-only tests (`backend/tests/test_health.py`) still work with no
 database configured at all, preserving the Phase 1 guarantee.
+
+### Test categories (Phase 4)
+
+Three distinct categories now exist, each with a different DB relationship:
+
+| Category | Example files | DB behavior |
+|---|---|---|
+| Fast unit tests | `test_ai_providers.py`, `test_ai_safety.py`, `test_ai_qualification.py`, `test_ai_system_instructions.py`, `test_db_session_lifecycle.py`, `test_streaming_generator_lifecycle.py` | No database at all |
+| Normal API tests | `test_auth.py`, `test_tenants.py`, `test_conversations_api.py`, everything else under `tests/` | One shared, rolled-back-at-the-end SQLAlchemy session per test (`db_backed_client`) — fast and fully isolated, but collapses what would be several independently-pooled production connections into one |
+| **PostgreSQL multi-connection integration tests** | `backend/tests/integration/test_conversation_concurrency.py` | Each simulated request gets its **own** freshly-checked-out connection from the real pool (`real_client` — no dependency override), and commits real rows to `ai_receptionist_dev` that the test itself deletes afterward |
+
+```bash
+cd backend
+.venv/bin/python -m pytest -q                # complete suite — includes all three categories
+.venv/bin/python -m pytest -m multiconn -v    # only the multi-connection integration tests
+.venv/bin/python -m pytest -m "not multiconn" -q  # everything except them (fast, no real commits)
+```
+
+`pytest -q` (and `./scripts/check.sh`) **never filters the multi-connection
+tests out** — they run by default whenever `DATABASE_URL` is configured,
+exactly like every other database-backed test, and are only skipped (with
+an explicit, visible pytest `SKIPPED`, never silently) when no database is
+configured at all. If they end up skipped in an environment where
+`DATABASE_URL` *is* set, something is wrong with that environment, not with
+the suite — do not treat that as "tests passed."
+
+### Why the multi-connection tests exist and how they differ
+
+`tests/conftest.py`'s `db_backed_client` fixture deliberately shares one
+session across every request in a test, which is exactly what let three
+real Phase 4 concurrency/connection-lifecycle bugs pass 255/255 unit tests
+before being found live (see docs/architecture.md and docs/PROGRESS.md).
+`backend/tests/integration/` exists specifically to catch a regression of
+any of those three bugs automatically: `real_client` uses the app's real,
+unmodified `get_db` dependency, so every simulated request gets a
+genuinely separate `Session`/pooled connection, and tests that need true
+overlapping execution (not just sequential separate connections) submit
+requests through a `ThreadPoolExecutor` with a bounded `.result(timeout=...)`
+— a real lock regression fails the test with a clear timeout rather than
+hanging the run. Every test that registers a tenant hands its id (and its
+owning user id) to the `cleanup_tenants` fixture, which re-verifies the
+database name and deletes exactly those rows — cascading to their
+conversations/messages/receptionists — once the test finishes, pass or
+fail; nothing broader is ever truncated or reset.

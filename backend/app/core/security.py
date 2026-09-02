@@ -87,6 +87,13 @@ def create_access_token(*, settings: Settings, user_id: uuid.UUID, session_id: u
 
 
 def decode_access_token(*, settings: Settings, token: str) -> AccessTokenPayload:
+    """Verifies signature, issuer, audience, and every time-based claim
+    (`iat`/`nbf`/`exp`) — `leeway` below applies *only* to the time-based
+    checks (PyJWT's own scope for that parameter); signature/issuer/audience
+    are never loosened by it. See `Settings.jwt_clock_skew_leeway_seconds`
+    for why a small, non-zero leeway is deliberately used here rather than
+    PyJWT's default of zero — root-caused via live reproduction, not
+    assumed."""
     secret = settings.require_jwt_secret()
     try:
         payload = jwt.decode(
@@ -96,6 +103,7 @@ def decode_access_token(*, settings: Settings, token: str) -> AccessTokenPayload
             issuer=settings.jwt_issuer,
             audience=settings.jwt_audience,
             options={"require": ["sub", "sid", "exp", "iat"]},
+            leeway=settings.jwt_clock_skew_leeway_seconds,
         )
     except jwt.PyJWTError as exc:
         raise InvalidAccessTokenError(str(exc.__class__.__name__)) from exc

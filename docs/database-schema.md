@@ -1,11 +1,12 @@
-# Database Schema (Phase 3)
+# Database Schema (Phase 4)
 
 PostgreSQL, SQLAlchemy 2.x typed models (`Mapped`/`mapped_column`), UUID
 primary keys (`uuid4`, generated application-side), UTC-aware timestamps
 (`TIMESTAMPTZ`, set by the database via `server_default=func.now()`, not the
-application clock). Two reviewed Alembic migrations:
-`backend/alembic/versions/6c6136895656_create_users_tenants_tenant_members_.py` (Phase 2)
-and `backend/alembic/versions/0f245f269b1d_add_industry_templates_onboarding_.py` (Phase 3).
+application clock). Three reviewed Alembic migrations:
+`backend/alembic/versions/6c6136895656_create_users_tenants_tenant_members_.py` (Phase 2),
+`backend/alembic/versions/0f245f269b1d_add_industry_templates_onboarding_.py` (Phase 3), and
+`backend/alembic/versions/038ab1fd9129_add_conversations_conversation_messages_.py` (Phase 4).
 
 ## Tables
 
@@ -283,11 +284,110 @@ tzdata build on this system does not recognize as canonical. See
 `docs/PROGRESS.md`'s gap-remediation section for the full root-cause
 writeup.
 
+## Phase 4 tables
+
+### `conversations`
+| Column | Type | Constraints |
+|---|---|---|
+| id | UUID | PK |
+| tenant_id | UUID | NOT NULL, indexed |
+| receptionist_id | UUID | NOT NULL |
+| | | Composite FK `(tenant_id, receptionist_id)` → `receptionists(tenant_id, id)` `ON DELETE CASCADE` — a conversation's receptionist is guaranteed to belong to the same tenant at the database level, not just by application-level filtering. Requires `receptionists` to carry a `UNIQUE(tenant_id, id)` constraint, added by this migration. |
+| mode | `conversation_mode` enum (`test`, `future_live`) | NOT NULL, default `test` — Phase 4 only ever creates `test` |
+| channel | `conversation_channel` enum (`dashboard_test`) | NOT NULL — the only channel Phase 4 implements |
+| provider | VARCHAR | NOT NULL — provider name active at conversation start (`"mock"` in Phase 4) |
+| status | `conversation_status` enum (`active`, `completed`, `abandoned`, `failed`) | NOT NULL, default `active` |
+| visitor_reference | VARCHAR | nullable — opaque, no PII assumed |
+| locale | VARCHAR | NOT NULL, default `en` |
+| collected_data | JSONB | NOT NULL, default `{}` — see "Why JSONB, not a field-value table" below |
+| missing_required_fields | JSONB | NOT NULL, default `[]` |
+| qualification_complete | BOOLEAN | NOT NULL, default false |
+| safety_state | JSONB | NOT NULL, default `{}` — bounded (last 20) triggered safety category history |
+| last_error_code | VARCHAR | nullable — bounded, safe-for-frontend code, never a raw exception |
+| started_at, last_message_at, completed_at | TIMESTAMPTZ | `started_at` NOT NULL; the others nullable |
+| created_at, updated_at | TIMESTAMPTZ | NOT NULL |
+
+### `conversation_messages`
+| Column | Type | Constraints |
+|---|---|---|
+| id | UUID | PK |
+| tenant_id | UUID | NOT NULL, indexed |
+| conversation_id | UUID | FK → `conversations.id` `ON DELETE CASCADE`, indexed |
+| role | `conversation_message_role` enum (`user`, `assistant`, `system`, `tool`) | NOT NULL |
+| content | TEXT | NOT NULL — the visible message text; never the full system instruction (see docs/security.md) |
+| sequence_number | INTEGER | NOT NULL |
+| | | `UNIQUE(conversation_id, sequence_number)` — a per-conversation total order enforced by the database, not just application logic |
+| provider_message_id | VARCHAR | nullable |
+| tool_name, tool_call_id | VARCHAR | nullable — populated only on `role="tool"` rows |
+| tool_input, tool_output | JSONB | nullable — bounded size; tool_output never includes raw credentials |
+| citations | JSONB | NOT NULL, default `[]` |
+| safety_labels | JSONB | NOT NULL, default `[]` |
+| latency_ms | INTEGER | nullable |
+| token_usage | JSONB | nullable |
+| idempotency_key | VARCHAR | nullable, partial unique index (non-null values only) per conversation — enables detecting/replaying a duplicate submission without a second DB round-trip just to check |
+| created_at | TIMESTAMPTZ | NOT NULL — no `updated_at`: messages are immutable once written |
+
+No `tenant_id` FK to `conversations.tenant_id` is declared separately here
+because it's redundant with the `conversation_id` FK plus the composite FK
+on `conversations` itself; the column exists purely so
+`TenantScopedRepository` can filter directly without a join.
+
+### `conversation_summaries`
+| Column | Type | Constraints |
+|---|---|---|
+| id | UUID | PK |
+| tenant_id | UUID | NOT NULL, indexed |
+| conversation_id | UUID | FK → `conversations.id` `ON DELETE CASCADE`, `UNIQUE` (one summary per conversation) |
+| summary | TEXT | NOT NULL |
+| captured_requirements | JSONB | NOT NULL, default `{}` |
+| unresolved_questions | JSONB | NOT NULL, default `[]` |
+| recommended_next_action | VARCHAR | nullable — one of the tenant's configured `enabled_actions`, never executed |
+| generated_by_provider | VARCHAR | NOT NULL |
+| created_at, updated_at | TIMESTAMPTZ | NOT NULL |
+
+### Why `collected_data` is JSONB, not a separate field-value table
+
+Considered and rejected: a normalized `conversation_field_values(conversation_id,
+field_key, value, ...)` table. `collected_data` stays JSONB because:
+
+- The qualification **schema itself** is already JSONB on `receptionist_workflows`
+  (Phase 3) — field keys, types, and options are dynamic, tenant-defined data,
+  not a fixed set of columns. A field-value table would need its own
+  type-punning (a `value` column that's sometimes a string, number, boolean,
+  or list) to mirror that same dynamism, buying no real structure over JSONB.
+- **Auditability doesn't require it.** Every capture/correction/rejection is
+  already durably recorded as a `tool`-role `ConversationMessage` row
+  (`tool_name="qualification_extraction"`, with `tool_input`/`tool_output`
+  holding exactly what was captured, corrected, and rejected and why) —
+  that's the audit trail, and it exists independent of how the *current*
+  snapshot is stored.
+- `collected_data` itself only ever needs to answer "what's the current
+  value of each field" — a single JSONB read, no join, matching how it's
+  actually consumed (building the qualification panel, the summary, the
+  `missing_required_fields` diff).
+
+A field-value table would add real schema and query complexity for a
+requirement (auditability) already satisfied elsewhere. Revisit only if a
+later phase needs to query/aggregate *across* conversations by individual
+field value at the database level — Phase 4 doesn't.
+
+### Composite FK ordering (migration note)
+
+`conversations` has a composite FK to `receptionists(tenant_id, id)`, which
+requires that pair to be unique *before* `conversations` is created. The
+autogenerated migration ordered these wrong (it emitted `conversations`
+before `receptionists`' new `UNIQUE(tenant_id, id)` constraint); hand-fixed
+to create the constraint first in `upgrade()`, and reversed the order in
+`downgrade()`. `alembic upgrade → downgrade → upgrade → check` all pass
+cleanly against the approved dev database with this fix.
+
 ## What's deliberately not here yet
 
-Conversation/message tables, lead/appointment execution tables, and any
-Revenue Brain / AI Sales Employee integration tables — all later phases,
-per the approved plan.
+Lead/appointment execution tables, live/public conversation channels, and
+any Revenue Brain / AI Sales Employee integration tables — all later
+phases, per the approved plan. Phase 4's `mode` and `channel` enums
+(`future_live`, and any channel beyond `dashboard_test`) exist as forward
+declarations only — nothing in Phase 4 ever sets or serves them.
 
 ## Known limitations (Phase 3)
 
@@ -299,3 +399,21 @@ per the approved plan.
   `model_config = ConfigDict(extra="forbid")`, so an unsupported/unexpected
   JSON key in a request body is rejected with `422` rather than silently
   dropped.
+
+## Known limitations (Phase 4)
+
+- **`autoflush=False` (a Phase 1 session setting) means any code computing
+  more than one thing derived from `MAX(...)`-style queries within a single
+  uncommitted transaction must not re-query — it must compute the first
+  value and increment locally.** `ConversationMessageRepository.next_sequence_number`
+  was affected (see docs/architecture.md's Phase 4 section for the full
+  incident writeup); the orchestrator's tool/assistant-message persistence
+  block was fixed to query once per transaction and increment a local
+  counter for subsequent messages in the same block.
+- `ConversationOrchestrator.submit_message` manages its own short,
+  explicitly-committed transactions rather than the codebase's usual
+  one-commit-per-request pattern, specifically because it's a
+  `StreamingResponse` body — see docs/architecture.md for why, and
+  docs/security.md for the concurrency limitation this leaves undocumented
+  by the automated test suite (which shares one session per test and
+  therefore cannot reproduce cross-connection lock contention).

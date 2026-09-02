@@ -32,6 +32,24 @@ class Settings(BaseSettings):
     jwt_audience: str = "ai-receptionist-clients"
     access_token_ttl_minutes: int = 15
     refresh_token_ttl_days: int = 30
+    # Small, deliberate tolerance for wall-clock disagreement between the
+    # process that signs a token and the process that verifies it —
+    # applied only to PyJWT's time-based claim checks (iat/nbf/exp), never
+    # to signature/issuer/audience. Root-caused via live reproduction (a
+    # tight create-then-immediately-decode loop, no test framework, no
+    # mocking involved): roughly 1 in 100,000-200,000 iterations, this
+    # environment's wall clock produced a `now()` reading 600-700ms
+    # *earlier* than one taken a fraction of a second before — consistent
+    # with a VM host time-sync correction — which PyJWT's zero-leeway
+    # default treated as "issued in the future" (`ImmatureSignatureError`)
+    # for a token that was, in reality, valid at the instant it was
+    # issued. 5 seconds is roughly 7-8x the largest skew actually observed
+    # (~0.7s) — enough margin for that class of correction without
+    # meaningfully weakening `exp`: it can only make an expired token
+    # valid for 5 more seconds out of a 900-second (15-minute) lifetime,
+    # about 0.6% of it. See docs/security.md for the full incident and
+    # trade-off writeup.
+    jwt_clock_skew_leeway_seconds: float = 5.0
 
     # --- Cookie security (environment-aware) ---
     # cookie_secure defaults to True everywhere except local development, so
@@ -40,6 +58,21 @@ class Settings(BaseSettings):
     cookie_samesite: Literal["lax", "strict", "none"] = "lax"
     refresh_cookie_name: str = "ai_receptionist_refresh"
     csrf_cookie_name: str = "ai_receptionist_csrf"
+
+    # --- AI conversation engine (Phase 4) ---
+    # Deliberately a plain str, not a Literal — provider resolution
+    # (app/ai/providers/factory.py) validates it explicitly and raises a
+    # controlled ProviderConfigurationError for an unknown name, which is
+    # both more testable and produces a clearer error than a raw pydantic
+    # validation failure at settings-parse time.
+    ai_provider: str = "mock"
+    openai_api_key: str | None = None
+    anthropic_api_key: str | None = None
+    ai_provider_timeout_seconds: float = 30.0
+    max_conversation_message_length: int = 4000
+    max_conversation_context_chars: int = 12000
+    retrieval_result_limit: int = 5
+    sse_heartbeat_seconds: float = 15.0
 
     @property
     def cors_origins_list(self) -> list[str]:

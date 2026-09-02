@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.v1 import (
     auth,
+    conversations,
     faqs,
     health,
     industry_templates,
@@ -26,3 +27,4 @@ api_router.include_router(locations.router, tags=["locations"])
 api_router.include_router(services.router, tags=["services"])
 api_router.include_router(faqs.router, tags=["faqs"])
 api_router.include_router(knowledge.router, tags=["knowledge"])
+api_router.include_router(conversations.router, tags=["conversations"])

@@ -1,5 +1,6 @@
 import uuid
-from collections.abc import Generator
+from collections.abc import Callable, Generator
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 
 from fastapi import Depends, Header, HTTPException, Path, status
@@ -8,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings, get_settings
 from app.core.security import InvalidAccessTokenError, decode_access_token
 from app.db.session import get_db as _get_db
+from app.db.session import session_scope as _session_scope
 from app.models.enums import ROLE_RANK, TenantMemberRole, TenantMemberStatus
 from app.models.user import User
 from app.repositories.tenant_member import TenantMemberRepository
@@ -16,6 +18,22 @@ from app.repositories.user import UserRepository
 
 def get_db() -> Generator[Session, None, None]:
     yield from _get_db()
+
+
+def get_session_scope_factory() -> Callable[[], AbstractContextManager[Session]]:
+    """Returns the *callable* that opens a session-owning context manager
+    (`app.db.session.session_scope`) — not a session itself. Exists only
+    for a `StreamingResponse` route whose generator body needs a session
+    held open for its own entire lifetime, independent of `Depends(get_db)`
+    (whose cleanup fires too early for a streaming route — see
+    `app.db.session.get_db`'s docstring). Depending on this factory rather
+    than calling `session_scope` directly is what lets
+    `db_backed_client` (see `tests/conftest.py`) substitute its own
+    session-owning context manager for that one route in tests, via the
+    normal `app.dependency_overrides` mechanism — `session_scope` itself is
+    a plain module function, not a `Depends()`-injected one, so it could
+    not be overridden this way if called directly."""
+    return _session_scope
 
 
 def get_bearer_token(authorization: str | None = Header(default=None)) -> str:

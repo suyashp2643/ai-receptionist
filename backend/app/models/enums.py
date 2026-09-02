@@ -56,3 +56,29 @@ class KnowledgeSourceType(str, enum.Enum):
 
 
 UNSUPPORTED_KNOWLEDGE_SOURCE_TYPES = frozenset({KnowledgeSourceType.WEBSITE, KnowledgeSourceType.FILE_UPLOAD})
+
+
+class ConversationMode(str, enum.Enum):
+    TEST = "test"
+    # Reserved for Phase 5+ (public/live widget conversations). The service
+    # layer never creates anything but TEST in Phase 4 — there is no request
+    # field that lets a client choose this value.
+    FUTURE_LIVE = "future_live"
+
+
+class ConversationChannel(str, enum.Enum):
+    DASHBOARD_TEST = "dashboard_test"
+
+
+class ConversationStatus(str, enum.Enum):
+    ACTIVE = "active"
+    COMPLETED = "completed"
+    ABANDONED = "abandoned"
+    FAILED = "failed"
+
+
+class ConversationMessageRole(str, enum.Enum):
+    USER = "user"
+    ASSISTANT = "assistant"
+    SYSTEM = "system"
+    TOOL = "tool"

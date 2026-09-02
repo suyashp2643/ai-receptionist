@@ -28,3 +28,6 @@ testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "multiconn: PostgreSQL multi-connection integration tests using genuinely separate SQLAlchemy sessions/connections per simulated request (tests/integration/). Requires DATABASE_URL pointed at the approved dev database. Included by default in `pytest -q` — never filtered out — so they run as part of standard verification whenever a database is configured; select only these with `pytest -m multiconn`.",
+]

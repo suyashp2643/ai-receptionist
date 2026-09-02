@@ -1,4 +1,4 @@
-# API Reference (Phase 3)
+# API Reference (Phase 4)
 
 Base path: `/api/v1`. Full interactive docs at `/docs` (Swagger UI) when the
 backend is running. See `docs/security.md` for the auth/CSRF model these
@@ -273,6 +273,68 @@ all its chunks. `POST .../search` body `{ "query": "..." }` → PostgreSQL
 full-text search, always scoped to the caller's tenant, never leaking
 another tenant's content.
 
+## Test conversations (Phase 4)
+
+Private and authenticated only — there is no public/unauthenticated
+conversation endpoint, and none of these routes require CSRF (they're all
+Bearer-token authenticated, not cookie-authenticated, matching every other
+tenant-scoped route). Minimum role is `member` throughout: running a private
+test conversation doesn't modify receptionist configuration, so the same
+read-permission tier that can already view a receptionist's settings can
+drive one.
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/api/v1/tenants/{tenant_id}/receptionists/{receptionist_id}/test-conversations` | Starts a conversation. `404` if the receptionist doesn't exist or belongs to another tenant. |
+| GET | `/api/v1/tenants/{tenant_id}/test-conversations` | Paginated list (`limit`/`offset`, capped at 50), optional `?receptionist_id=` filter. |
+| GET | `/api/v1/tenants/{tenant_id}/test-conversations/{id}` | Conversation + paginated messages + summary (`null` until completed). |
+| POST | `/api/v1/tenants/{tenant_id}/test-conversations/{id}/messages` | The conversation turn — see SSE contract below. Body: `{ "content": "...", "idempotency_key": "<optional>" }`. |
+| POST | `/api/v1/tenants/{tenant_id}/test-conversations/{id}/complete` | Marks the conversation completed and generates its summary. `409` if already completed/abandoned. |
+
+There is deliberately no separate `GET .../stream` route and no `.../retry`
+route: the SSE stream *is* the direct response of `POST .../messages`, and
+retry is just resubmitting that same call with the same `idempotency_key`
+(the second call replays the stored result rather than reprocessing, so a
+retry can never produce a different qualification outcome than the first
+attempt got).
+
+### SSE event contract
+
+`POST .../messages` returns `text/event-stream`. Events, in emission order:
+
+| Event | When | Payload |
+|---|---|---|
+| `message.started` | Immediately after the user message is persisted | `conversation_id`, `user_message_id`, `sequence_number` |
+| `retrieval.completed` | After grounding search runs (skipped, `count: 0`, if a safety response will be used instead) | `count`, `sources: [{source_id, source_type, title, score}]` |
+| `tool.started` | Before executing an allow-listed tool call | `tool_name`, `call_id` |
+| `tool.completed` | After that tool call returns | `tool_name`, `call_id`, `status` |
+| `response.delta` | Once per streamed chunk of the final answer | `delta` |
+| `response.completed` | Once, after the assistant message is persisted | `message_id`, `sequence_number`, `content`, `citations`, `safety_labels` |
+| `conversation.updated` | Always last on success | `collected_data`, `missing_required_fields`, `qualification_complete`, `status` |
+| `response.error` | In place of `response.completed`/`conversation.updated` on a provider failure | `code`, `message` (never a raw exception, stack trace, or provider error string) |
+
+A `response.error` event means the turn did **not** complete — the client
+must not treat it as if `conversation.updated` had been received, and the
+persisted conversation state on a subsequent `GET` will agree (no
+partial/phantom completion). `message_id` and every other identifier in
+these events is always a real, already-persisted UUID string — never a
+placeholder.
+
+### Qualification, safety, and tools surfaced by these events
+
+- `missing_required_fields` / `collected_data` (from `conversation.updated`)
+  drive the test console's qualification panel. A rejected/invalid select
+  value is never written to `collected_data` — it stays in
+  `missing_required_fields` and the next turn's `response.delta` explains
+  why.
+- `safety_labels` on `response.completed` is non-empty exactly when that
+  turn's reply came from the deterministic safety engine
+  (`app/ai/safety.py`), not the provider — see docs/security.md.
+- `tool.started`/`tool.completed` only ever name one of the four
+  server-registered, allow-listed tools (`search_business_knowledge`,
+  `list_services`, `get_business_hours`, `get_business_profile`) — no
+  write-action tool exists or can be invoked in Phase 4.
+
 ## Error shape
 
 Every error response (from `app/core/errors.py`) has the same shape:
@@ -282,9 +344,12 @@ Every error response (from `app/core/errors.py`) has the same shape:
 (422 validation errors additionally include `"details": [...]` — the
 Pydantic error list, safely JSON-encoded via `jsonable_encoder`.)
 
-## Not implemented in Phase 3
+## Not implemented in Phase 4
 
-AI providers, LLM calls, conversation orchestration, streaming, chat
-messages, embeddings, website crawling, document parsing, voice, the public
-widget, appointment execution, analytics, and any Revenue Brain / AI Sales
-Employee integration — all later, explicitly-approved phases.
+The public embeddable widget conversation endpoint, browser voice, telephone
+calling, WhatsApp/SMS, live/public (unauthenticated) conversations, actual
+appointment/lead/handoff execution, CRM integrations, billing, production
+analytics, and any Revenue Brain / AI Sales Employee integration — all
+later, explicitly-approved phases. A real (non-mock) provider's HTTP calls,
+embeddings, website crawling, document parsing, and voice are likewise still
+out of scope.

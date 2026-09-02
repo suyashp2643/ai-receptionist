@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
-# Runs every verification command used in Phase 1: backend tests/lint/type-check,
-# frontend lint/type-check/build, widget lint/type-check/build.
-# Safe to re-run any time; makes no destructive changes.
+# Runs every verification command used across every phase so far: backend
+# tests/lint/type-check (including the Phase 4 PostgreSQL multi-connection
+# integration suite whenever DATABASE_URL is configured — see
+# tests/integration/), frontend lint/type-check/build, widget
+# lint/type-check/build.
+# Safe to re-run any time; makes no destructive changes to shared data (the
+# multi-connection suite creates and deletes only its own uniquely
+# identifiable test tenants — see tests/integration/conftest.py).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-echo "== Backend: pytest =="
+echo "== Backend: pytest (full suite, includes multi-connection integration tests when DB is configured) =="
 (cd "$REPO_ROOT/backend" && .venv/bin/python -m pytest -q)
+
+echo "== Backend: pytest -m multiconn (explicit, for visibility — same tests already ran above) =="
+(cd "$REPO_ROOT/backend" && .venv/bin/python -m pytest -m multiconn -v)
 
 echo "== Backend: ruff =="
 (cd "$REPO_ROOT/backend" && .venv/bin/python -m ruff check app tests)

@@ -84,10 +84,13 @@ export default function DashboardPage() {
         )}
 
         {primaryMembership && onboarding && onboarding.status === "completed" && (
-          <section className="rounded-lg border border-black/10 dark:border-white/15 p-4">
-            <p className="font-medium mb-2">Receptionist configuration</p>
+          <section className="rounded-lg border border-black/10 dark:border-white/15 p-4 flex flex-col gap-2">
+            <p className="font-medium">Receptionist configuration</p>
             <Link href="/dashboard/settings/business-profile" className="text-sm underline">
               Manage business profile, receptionist, locations, services, knowledge, and more
+            </Link>
+            <Link href="/dashboard/receptionist/test" className="text-sm underline">
+              Open the private test console (mock AI demonstration)
             </Link>
           </section>
         )}
