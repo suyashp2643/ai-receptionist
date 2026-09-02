@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Sunrise Realty Group — Demo Host Page</title>
+<style>
+  body { font-family: sans-serif; max-width: 700px; margin: 60px auto; padding: 0 20px; line-height: 1.5; }
+  h1 { color: #1a3c6e; }
+</style>
+</head>
+<body>
+  <h1>Sunrise Realty Group</h1>
+  <p>
+    This is a plain demo host page used only to verify the AI Receptionist embeddable widget
+    (Phase 5). It is not part of the product itself — it stands in for a real customer's website.
+  </p>
+  <p>Look for the chat launcher in the corner of the page.</p>
+
+  <!-- Installation snippet (Phase 5 contract): no secret, no tenant UUID, async load,
+       the widget fetches its own safe config from the backend at runtime. -->
+  <script
+    src="../dist/widget.js"
+    data-receptionist-id="REPLACE_WITH_YOUR_WIDGET_PUBLIC_ID"
+    data-api-base-url="http://localhost:8000"
+    async
+  ></script>
+</body>
+</html>

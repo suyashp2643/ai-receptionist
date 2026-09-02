@@ -1,12 +1,13 @@
-# Database Schema (Phase 4)
+# Database Schema (Phase 5)
 
 PostgreSQL, SQLAlchemy 2.x typed models (`Mapped`/`mapped_column`), UUID
 primary keys (`uuid4`, generated application-side), UTC-aware timestamps
 (`TIMESTAMPTZ`, set by the database via `server_default=func.now()`, not the
-application clock). Three reviewed Alembic migrations:
+application clock). Four reviewed Alembic migrations:
 `backend/alembic/versions/6c6136895656_create_users_tenants_tenant_members_.py` (Phase 2),
-`backend/alembic/versions/0f245f269b1d_add_industry_templates_onboarding_.py` (Phase 3), and
-`backend/alembic/versions/038ab1fd9129_add_conversations_conversation_messages_.py` (Phase 4).
+`backend/alembic/versions/0f245f269b1d_add_industry_templates_onboarding_.py` (Phase 3),
+`backend/alembic/versions/038ab1fd9129_add_conversations_conversation_messages_.py` (Phase 4), and
+`backend/alembic/versions/1aa533d3cabf_add_widget_installations_visitor_.py` (Phase 5).
 
 ## Tables
 
@@ -381,13 +382,197 @@ to create the constraint first in `upgrade()`, and reversed the order in
 `downgrade()`. `alembic upgrade → downgrade → upgrade → check` all pass
 cleanly against the approved dev database with this fix.
 
+## Phase 5 tables
+
+One migration (`1aa533d3cabf`) adds six new tenant-owned tables plus two
+additive enum values on Phase 4's existing `conversation_mode`/
+`conversation_channel` Postgres enums (`widget` on each — `future_live`
+remains reserved, unused). All six new tables follow the same conventions
+as Phase 1-4: `UUIDPrimaryKeyMixin`, `TimestampMixin` (except
+`widget_visitor_sessions`, which follows `refresh_tokens`' manual-timestamp
+convention instead — see below), explicit `tenant_id` FKs, and — where a
+table also has a `receptionist_id` — a composite
+`FOREIGN KEY (tenant_id, receptionist_id) REFERENCES receptionists(tenant_id, id)`
+(reusing the `uq_receptionists_tenant_id_id` constraint Phase 4 added),
+guaranteeing at the database level that a row can never reference a
+receptionist belonging to a different tenant.
+
+### `widget_installations`
+| Column | Type | Constraints |
+|---|---|---|
+| id | UUID | PK |
+| tenant_id | UUID | indexed; part of composite FK below |
+| receptionist_id | UUID | part of composite FK to `receptionists(tenant_id, id)` `ON DELETE CASCADE` |
+| public_id | VARCHAR(64) | UNIQUE, NOT NULL (`secrets.token_urlsafe(24)` — public, non-secret; see `docs/security.md`) |
+| status | `widget_installation_status` enum (`draft`, `active`, `paused`, `revoked`) | NOT NULL, default `draft` |
+| allowed_domains | JSONB | NOT NULL, default `[]` (normalized bare hostnames only) |
+| theme | JSONB | NOT NULL, default `{}` |
+| launcher_position | VARCHAR(20) | NOT NULL, default `bottom-right` |
+| privacy_notice | VARCHAR(4000) | NOT NULL, default `""` |
+| ai_disclosure | VARCHAR(1000) | NOT NULL, default (a standard mock-mode disclosure sentence) |
+| revoked_at | TIMESTAMPTZ | nullable |
+| created_at, updated_at | TIMESTAMPTZ | NOT NULL |
+
+### `widget_visitor_sessions`
+| Column | Type | Constraints |
+|---|---|---|
+| id | UUID | PK |
+| tenant_id | UUID | FK → `tenants.id` `ON DELETE CASCADE`, indexed |
+| widget_installation_id | UUID | FK → `widget_installations.id` `ON DELETE CASCADE`, indexed |
+| conversation_id | UUID | FK → `conversations.id` `ON DELETE CASCADE`, **UNIQUE** |
+| token_hash | VARCHAR(64) | UNIQUE, NOT NULL (SHA-256 hex — raw capability token never stored, same pattern as `refresh_tokens.token_hash`) |
+| expires_at | TIMESTAMPTZ | NOT NULL |
+| revoked_at | TIMESTAMPTZ | nullable |
+| created_at | TIMESTAMPTZ | NOT NULL |
+| last_seen_at | TIMESTAMPTZ | nullable |
+
+`conversation_id` is `UNIQUE`, not just indexed: a session is always scoped
+1:1 to exactly one conversation, by construction, not just by convention —
+see `docs/security.md`'s capability-token lifecycle. No `updated_at`,
+matching `refresh_tokens`' immutable-except-two-fields convention.
+
+### `contacts`
+| Column | Type | Constraints |
+|---|---|---|
+| id | UUID | PK |
+| tenant_id | UUID | FK → `tenants.id` `ON DELETE CASCADE`, indexed |
+| conversation_id | UUID | FK → `conversations.id` `ON DELETE SET NULL`, nullable |
+| name | VARCHAR(200) | nullable |
+| normalized_email | VARCHAR(320) | nullable, indexed |
+| normalized_phone | VARCHAR(32) | nullable, indexed |
+| preferred_contact_method | `preferred_contact_method` enum (`email`, `phone`, `either`) | nullable |
+| marketing_consent | BOOLEAN | NOT NULL, default `false` |
+| consent_captured_at | TIMESTAMPTZ | nullable — set only when `marketing_consent` is explicitly `true` |
+| source | VARCHAR(50) | NOT NULL, default `widget` |
+| created_at, updated_at | TIMESTAMPTZ | NOT NULL |
+
+`conversation_id` is `SET NULL` on delete, not `CASCADE`: a contact must
+outlive the single conversation that first captured it, since it may be
+found and reused across a visitor's later conversations (tenant-scoped
+dedup by normalized email, then phone).
+
+### `enquiries`
+| Column | Type | Constraints |
+|---|---|---|
+| id | UUID | PK |
+| tenant_id, receptionist_id | UUID | composite FK to `receptionists(tenant_id, id)` `ON DELETE CASCADE`, `tenant_id` indexed |
+| contact_id | UUID | FK → `contacts.id` `ON DELETE SET NULL`, nullable |
+| conversation_id | UUID | FK → `conversations.id` `ON DELETE CASCADE`, **UNIQUE** |
+| source | VARCHAR(50) | NOT NULL, default `widget` |
+| status | `enquiry_status` enum (`new`, `qualified`, `closed`) | NOT NULL, default `new` |
+| qualification_data | JSONB | NOT NULL, default `{}` |
+| qualification_complete | BOOLEAN | NOT NULL |
+| recommended_next_action | VARCHAR(50) | nullable |
+| created_at, updated_at | TIMESTAMPTZ | NOT NULL |
+
+One row per widget conversation (enforced by the `UNIQUE` on
+`conversation_id`, upserted after every message turn) — a durable,
+tenant-reviewable snapshot of qualification progress, deliberately separate
+from `Conversation.collected_data` (Phase 4) so a tenant retains a stable
+local record even if the conversation itself is later pruned. Local-only:
+no Revenue Brain or external CRM sync exists.
+
+### `appointment_requests`
+| Column | Type | Constraints |
+|---|---|---|
+| id | UUID | PK |
+| tenant_id, receptionist_id | UUID | composite FK to `receptionists(tenant_id, id)` `ON DELETE CASCADE`, `tenant_id` indexed |
+| conversation_id | UUID | FK → `conversations.id` `ON DELETE CASCADE`, indexed |
+| contact_id | UUID | FK → `contacts.id` `ON DELETE SET NULL`, nullable |
+| location_id | UUID | FK → `business_locations.id` `ON DELETE SET NULL`, nullable |
+| service_id | UUID | FK → `services.id` `ON DELETE SET NULL`, nullable |
+| requested_date | DATE | NOT NULL |
+| requested_time | TIME | nullable |
+| requested_time_window | VARCHAR(50) | nullable |
+| timezone | VARCHAR(64) | NOT NULL |
+| notes | VARCHAR(2000) | nullable |
+| status | `appointment_request_status` enum (`pending`, `confirmed`, `declined`, `cancelled`) | NOT NULL, default `pending` |
+| idempotency_key | VARCHAR(128) | nullable |
+| created_at, updated_at | TIMESTAMPTZ | NOT NULL |
+
+`location_id`/`service_id` are plain FKs — same-tenant validity is enforced
+at the service layer (`appointment_request_service.create_appointment_request`),
+the same pattern Phase 3 uses for `Service.location_id`, since a raw FK
+alone cannot express "must belong to the same tenant as this request." The
+public widget form does not currently expose a location/service picker (no
+public endpoint lists them yet) — see `docs/api.md`'s "Not implemented"
+section; a visitor names one in free-text `notes` if relevant.
+
+### `human_handoffs`
+| Column | Type | Constraints |
+|---|---|---|
+| id | UUID | PK |
+| tenant_id, receptionist_id | UUID | composite FK to `receptionists(tenant_id, id)` `ON DELETE CASCADE`, `tenant_id` indexed |
+| conversation_id | UUID | FK → `conversations.id` `ON DELETE CASCADE`, indexed |
+| contact_id | UUID | FK → `contacts.id` `ON DELETE SET NULL`, nullable |
+| reason | VARCHAR(1000) | NOT NULL |
+| urgency | VARCHAR(20) | nullable |
+| preferred_contact_method | `preferred_contact_method` enum | nullable (same Postgres enum type as `contacts.preferred_contact_method`) |
+| status | `handoff_status` enum (`open`, `claimed`, `resolved`, `cancelled`) | NOT NULL, default `open` |
+| resolved_at | TIMESTAMPTZ | nullable |
+| idempotency_key | VARCHAR(128) | nullable |
+| created_at, updated_at | TIMESTAMPTZ | NOT NULL |
+
+### Enum-cleanup migration note
+
+Alembic's autogenerated `downgrade()` drops tables but does **not** drop the
+native Postgres enum types those tables' columns implicitly created — left
+alone, re-running `upgrade()` after a `downgrade()` fails with "type already
+exists." Confirmed live (not assumed): running the unfixed autogenerated
+migration's `downgrade -1` and querying `pg_type` afterward showed all five
+new Phase 5 enum types (`widget_installation_status`,
+`preferred_contact_method`, `appointment_request_status`, `enquiry_status`,
+`handoff_status`) still present after their owning tables were gone.
+Hand-fixed by appending an explicit `sa.Enum(name=...).drop(op.get_bind(),
+checkfirst=True)` loop to `downgrade()`, dropping `preferred_contact_method`
+last (once, after both `contacts` and `human_handoffs` — the two tables
+that share it — are already dropped). A related concern (that reusing one
+named enum type across two `create_table()` calls in the same migration
+would fail on `upgrade()`) was directly tested and disproven for the
+SQLAlchemy version in use — no fix was needed there, only in `downgrade()`.
+
+A **separate** issue affects the pre-existing `conversation_mode`/
+`conversation_channel` enums: Alembic's autogenerate does not detect a
+native enum *value* addition on an already-existing type at all (only
+whole table/column diffs), so adding `widget` as a Python enum member
+required a hand-written `op.execute("ALTER TYPE conversation_mode ADD
+VALUE IF NOT EXISTS 'widget'")` (and the same for `conversation_channel`)
+at the top of `upgrade()` — this was not something autogenerate produced or
+would ever have produced. `downgrade()` does not attempt to remove these
+added values (Postgres has no `ALTER TYPE ... DROP VALUE`; doing so would
+require rebuilding the type and rewriting every row of the pre-existing
+`conversations` table) — a documented, deliberately accepted asymmetry.
+
+Full upgrade → downgrade → upgrade → `alembic current` → `alembic check`
+cycle verified clean against the approved dev database, with zero orphaned
+enum types and zero impact on pre-existing Phase 1-4 data, both before and
+after this fix.
+
+### A real, model-level bug this migration's review caught
+
+The first version of all six new enum columns (`WidgetInstallationStatus`,
+`AppointmentRequestStatus`, `EnquiryStatus`, `HandoffStatus`,
+`PreferredContactMethod`) omitted the `values_callable=lambda cls: [m.value
+for m in cls]` argument every existing native-enum column in this codebase
+uses (see `conversations.mode`/`channel`/`status` for the established
+pattern) — without it, SQLAlchemy stores the Python enum **member name**
+(`"ACTIVE"`) rather than its `.value` (`"active"`) in the database. This
+was caught by a live integration test (starting a real widget conversation
+against a real database), not by a unit test with mocked data, because the
+mismatch is silently self-consistent unless something else expects the
+lowercase value in the actual stored row. Fixed by adding
+`values_callable` to all six columns and regenerating the migration
+(confirmed the regenerated migration's `CREATE TYPE ... AS ENUM(...)`
+statements list lowercase values before applying it).
+
 ## What's deliberately not here yet
 
-Lead/appointment execution tables, live/public conversation channels, and
-any Revenue Brain / AI Sales Employee integration tables — all later
-phases, per the approved plan. Phase 4's `mode` and `channel` enums
-(`future_live`, and any channel beyond `dashboard_test`) exist as forward
-declarations only — nothing in Phase 4 ever sets or serves them.
+Live calendar/booking tables, actual telephony/WhatsApp/SMS delivery
+records, structured public service/location selection for appointment
+requests, and any Revenue Brain / AI Sales Employee integration tables —
+all later phases, per the approved plan. The `future_live` value on
+`conversation_mode` remains a forward declaration only — nothing sets or
+serves it yet.
 
 ## Known limitations (Phase 3)
 
@@ -417,3 +602,26 @@ declarations only — nothing in Phase 4 ever sets or serves them.
   docs/security.md for the concurrency limitation this leaves undocumented
   by the automated test suite (which shares one session per test and
   therefore cannot reproduce cross-connection lock contention).
+
+## Known limitations (Phase 5)
+
+- **`InMemoryRateLimiter` is single-process only** — see docs/security.md.
+- **Domain allow-lists are exact-match, no implicit subdomain/`www.`
+  expansion** — a tenant serving from both `example.com` and
+  `www.example.com` must list both.
+- **Retention defaults are declared configuration, not an enforced
+  policy** — no automated deletion job exists yet; see docs/security.md's
+  Retention section for exactly which records currently require manual
+  deletion (all of them) and the documented future deletion-job boundary.
+- ~~`appointment_requests.location_id`/`service_id` have no public picker
+  UI or endpoint~~ — **resolved**: `GET .../config` now lists active
+  services/locations and the widget's appointment form offers them as
+  optional selects, re-validated server-side (same-tenant, active-only, and
+  the service→location relationship where one exists) — see
+  docs/architecture.md and docs/api.md.
+- **`Enquiry` is upserted best-effort after each widget message turn**, not
+  inside the same transaction as the message itself — a crash between the
+  two would leave `Conversation.collected_data` updated but its `Enquiry`
+  snapshot briefly stale, self-correcting on the conversation's next turn.
+  Acceptable for a local review record; not used as a source of truth for
+  anything transactional.

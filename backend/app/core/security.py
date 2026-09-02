@@ -138,3 +138,20 @@ def hash_refresh_token(raw_token: str) -> str:
 
 def generate_csrf_token() -> str:
     return secrets.token_urlsafe(32)
+
+
+# --- Widget visitor capability tokens (opaque, random — never JWTs) ---
+# Same shape as refresh tokens above: returned to the browser exactly once,
+# only the hash is ever persisted (see WidgetVisitorSession.token_hash).
+
+_VISITOR_CAPABILITY_TOKEN_BYTES = 32  # 256 bits of entropy
+
+
+def generate_visitor_capability_token() -> str:
+    return secrets.token_urlsafe(_VISITOR_CAPABILITY_TOKEN_BYTES)
+
+
+def hash_visitor_capability_token(raw_token: str) -> str:
+    """Fast hash is intentional — see hash_refresh_token's docstring above;
+    the same reasoning applies to this equally high-entropy random token."""
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()

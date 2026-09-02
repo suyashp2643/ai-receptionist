@@ -145,8 +145,9 @@ don't need to be set for local development.
    update live, and use **Complete conversation** to generate and view the
    stored summary. **Reload an existing test conversation** restores any
    past conversation's full transcript and summary from the database.
-4. There is no public-facing equivalent yet — this route requires an
-   authenticated tenant member and is not the Phase 5+ embeddable widget.
+4. This route requires an authenticated tenant member — it is not the
+   public embeddable widget. For the public, unauthenticated-beyond-a-
+   capability-token equivalent (Phase 5), see "3. Widget" below.
 
 ## 2. Frontend
 
@@ -163,16 +164,72 @@ Open http://localhost:3000 — the home page's "Backend API status" panel
 calls `NEXT_PUBLIC_API_URL` (default `http://localhost:8000`) and shows the
 live result of `/api/v1/health`.
 
-## 3. Widget (foundation only in Phase 1)
+## 3. Widget (Phase 5)
 
 ```bash
 cd widget
 npm install
-npm run build   # compiles src/index.ts -> dist/
+npm run build    # tsc -p tsconfig.json — type declarations to dist/*.d.ts
+npm run bundle   # esbuild -> dist/widget.js (the embeddable IIFE, ~25KB minified)
+npm test         # vitest — watch mode
+npm run test:run # vitest — single run
 ```
 
-There is no runnable UI yet — see `widget/src/index.ts` for the current
-placeholder export and Phase 5 plan.
+`npm run bundle` requires esbuild's native binary; if `npm install` reports
+`allow-scripts pending` for `esbuild`, approve its postinstall script once
+(it only downloads esbuild's own platform binary, nothing external to the
+package):
+
+```bash
+npm approve-scripts esbuild
+```
+
+### Trying the widget against a real backend
+
+**Fastest path**: once an installation is created and activated in the
+dashboard (`/dashboard/receptionist/widget`), its "Live local preview"
+panel embeds the real widget bundle against the real backend directly in
+the dashboard — no separate static server or demo page needed. It only
+requires `widget/dist/widget.js` to actually exist (`cd widget && npm run
+bundle`) and be reachable at the installation's `widget_bundle_url`
+(`http://localhost:5174/dist/widget.js` by default, matching step 3
+below's `python3 -m http.server 5174` served from the `widget/` directory
+root — **not** a bare `/widget.js` path, which found a real bug during
+Phase 5 follow-up live verification: the two defaults originally
+disagreed, and the dashboard preview's browser request for the bundle
+failed with `ERR_BLOCKED_BY_ORB` against a 404). The steps below are for
+testing the snippet on a genuinely separate page, the way a real
+customer's site would embed it.
+
+1. Start the backend (`AI_PROVIDER=mock` is the default — no key needed) and
+   register a tenant, business profile, and an **active** receptionist — the
+   same steps `docs/PROGRESS.md`'s live E2E script walks through, or just
+   use the dashboard.
+2. In the dashboard, create and **activate** a widget installation
+   (`/dashboard/receptionist/widget`) with `localhost` in its allowed
+   domains — `localhost` is only accepted while the backend's
+   `ENVIRONMENT=development` (see `docs/security.md`). Copy its `public_id`
+   from the installation list or the embed snippet.
+3. Serve the `widget/` directory itself (so both the demo page and the
+   bundle are reachable from one origin) on the port
+   `Settings.widget_bundle_url` expects by default (`5174`):
+   ```bash
+   cd widget && python3 -m http.server 5174
+   ```
+4. Edit `widget/demo/index.html`'s `data-receptionist-id` to the `public_id`
+   from step 2 (it already points `src` at `../dist/widget.js` and
+   `data-api-base-url` at `http://localhost:8000`), then open
+   `http://localhost:5174/demo/index.html` in a browser. This file is a
+   plain static host page standing in for a real customer's website — it is
+   not served by, or part of, the product itself.
+5. Rebuild the bundle (`npm run bundle`) after any `src/` change and reload
+   the demo page — there is no watch/hot-reload for the bundle step.
+
+A capability token issued by `POST .../sessions` is stored in
+`sessionStorage` (not `localStorage`, not a cookie — see
+docs/security.md), scoped per `public_id`; clearing it
+(`sessionStorage.clear()` in devtools, or a private/incognito window) forces
+a fresh conversation on next open instead of resuming.
 
 ## 4. Running all checks
 

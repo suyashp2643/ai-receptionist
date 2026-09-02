@@ -1119,4 +1119,388 @@ under Known Limitations below for future hardening.
   concurrent local test runs against a shared dev database become a normal
   workflow.
 
-The public embeddable widget, awaiting approval before starting.
+## Phase 5 — Public Embeddable Widget, Browser Voice, Contact/Appointment/Handoff Capture & Installation Management (complete, awaiting commit approval)
+
+Built on Phase 4's approved commit `c8eda1e`. Scope, per the approved
+directive: a public embeddable website widget, browser-based voice, secure
+public conversations, contact capture, appointment requests, human-handoff
+requests, and installation management — explicitly **not** production
+analytics, billing, real telephone calls, Twilio, WhatsApp/SMS, live
+calendar booking, real email sending, CRM sync, Revenue Brain / AI Sales
+Employee integration, paid AI-provider usage, a public marketing site
+redesign, or Phase 7 industry-demo pages. Zero-cost throughout:
+`AI_PROVIDER=mock`, local PostgreSQL, browser-native voice, no new paid
+service of any kind.
+
+### What was built
+
+- One new Alembic migration (`1aa533d3cabf`) adding `widget_installations`,
+  `widget_visitor_sessions`, `contacts`, `enquiries`, `appointment_requests`,
+  `human_handoffs`, plus additive `widget` values on the pre-existing
+  `conversation_mode`/`conversation_channel` Postgres enums. Full schema,
+  the enum-cleanup migration pattern, and two real bugs this migration's
+  review caught (missing `values_callable` on every new enum column;
+  autogenerate not detecting the enum-value addition on the existing
+  `conversation_mode`/`conversation_channel` types) are in
+  docs/database-schema.md.
+- Six new tenant-scoped repositories, `app/core/domain_validation.py`
+  (hostname normalization/validation), `app/core/rate_limit.py` (a
+  `RateLimiter` Protocol + single-process `InMemoryRateLimiter`),
+  `app/core/client_identity.py` (privacy-conscious hashed-IP rate-limit
+  keys), new capability-token helpers in `app/core/security.py`, and five
+  new services (`widget_installation_service`, `widget_visitor_session_service`,
+  `contact_service`, `appointment_request_service`, `human_handoff_service`,
+  `enquiry_service`).
+- `ConversationOrchestrator.start_conversation` extended additively with
+  optional `mode`/`channel` parameters (defaults unchanged — the Phase 4
+  dashboard test-console call site is unaffected); the SSE streaming
+  adapter is reused completely unchanged for public widget messages.
+- The full public widget API (`app/api/v1/widget_public.py`, 8 routes) and
+  its dedicated authorization layer (`app/api/widget_deps.py`,
+  `WidgetVisitorContext` — the widget-API analog of `TenantContext`, built
+  from `public_id` + a capability token instead of a JWT). See
+  docs/api.md/docs/security.md for the full route-by-route contract and
+  threat model.
+- Dashboard-facing widget installation management API (create/read/update/
+  activate/pause/revoke/embed-snippet) and a minimal, read-only
+  widget-records verification API (contacts/enquiries/appointment-requests/
+  handoff-requests) — deliberately not the full Phase 6 analytics
+  dashboard.
+- Dashboard page `/dashboard/receptionist/widget` — installation creation,
+  allowed-domain configuration, status changes, embed-snippet copy, a
+  configuration preview card, and the widget-records verification tables.
+- The embeddable widget itself (`widget/`) — a dependency-free TypeScript
+  package bundled with esbuild into one ~25KB minified IIFE
+  (`widget/dist/widget.js`): Shadow DOM launcher/panel/transcript/composer,
+  SSE streaming, suggested questions, contact/appointment/handoff forms
+  (marketing consent unticked by default; "pending confirmation" and
+  "does not connect you immediately" wording verified live, not just in
+  code), browser-native voice (STT via `SpeechRecognition`, TTS via
+  `speechSynthesis`, both feature-detected), `sessionStorage`-based session
+  resume, duplicate-mount prevention, and a mock-mode badge that is never
+  removed or defaulted false. Full module breakdown: docs/architecture.md.
+- A CORS policy separate from the dashboard's
+  (`app/core/widget_cors.WidgetPublicCorsMiddleware`) for the fundamentally
+  different trust model a public, arbitrary-third-party-domain API needs
+  (see the bugs below).
+- 23 new backend tests (`tests/test_widget_public_api.py`), 4 new CORS
+  regression tests (`tests/test_widget_cors.py`), 7 new frontend tests
+  (`page.test.tsx` for the widget dashboard page), 36 new widget tests
+  (`storage.test.ts`, `voice.test.ts`, `api.test.ts`, `ui.test.ts`).
+
+### Eight real bugs found and fixed — six via live testing, none caught by the unit suite until reproduced deliberately afterward
+
+Consistent with every prior phase: the automated suite passed throughout
+until each of these was found live and a regression test was added
+afterward to lock it in. (An earlier draft of this report undercounted
+these as "six" while enumerating seven — corrected here to an exact,
+one-to-one count of eight distinct fixes.)
+
+1. **Wrong enum values stored in the database.** Every new Phase 5 enum
+   column initially omitted the `values_callable` argument every existing
+   enum column in this codebase uses, so SQLAlchemy stored the Python
+   member *name* (`"ACTIVE"`) instead of its `.value` (`"active"`) — caught
+   by a real integration test starting an actual widget conversation
+   against a live database, not a unit test with mocked data (the mismatch
+   is silently self-consistent unless something else expects the lowercase
+   value in the actual stored row). Fixed by adding `values_callable` to
+   all six columns and regenerating the migration. Full details:
+   docs/database-schema.md.
+2. **Alembic autogenerate silently missed a required schema change.** It
+   does not detect a native Postgres enum **value** addition on an
+   already-existing type at all (only whole table/column diffs) — adding
+   `widget` to the pre-existing `conversation_mode`/`conversation_channel`
+   enums required a hand-written `ALTER TYPE ... ADD VALUE` that
+   autogenerate would never have produced on its own, found only by
+   actually running the generated migration and hitting `invalid input
+   value for enum conversation_mode: "widget"` against a live database.
+3. **No CORS handling existed at all for the public widget API.** The first
+   live-browser attempt to open the demo host page's widget failed
+   immediately — every request was blocked before reaching the server,
+   because the dashboard's `CORSMiddleware` only allows
+   `http://localhost:3000` and the widget's demo page runs on a different
+   origin by design (a real customer's site always would). This is not a
+   configuration gap that could have been caught by widening
+   `CORS_ALLOW_ORIGINS` — the whole point of the public widget is running
+   on domains not known until a tenant configures them at runtime. Fixed by
+   adding a separate `WidgetPublicCorsMiddleware`.
+4. **Middleware ordering bug**, found immediately after fixing #3: the new
+   middleware's own OPTIONS preflight handling was never reached — a live
+   curl preflight check showed `CORSMiddleware`'s fixed-origin rejection
+   (`400`) instead. Confirmed empirically (not assumed) that
+   `app.add_middleware()` makes the *most recently added* middleware
+   outermost; fixed by reordering so `WidgetPublicCorsMiddleware` is added
+   after `CORSMiddleware`.
+5. **Credential leakage**, found immediately after fixing #4 via a live
+   curl check against a deliberately disallowed origin: the response
+   carried `Access-Control-Allow-Credentials: true` *alongside* the new
+   middleware's own correct reflected-origin header — `CORSMiddleware` was
+   still running for every widget request (wrapped *inside* the new
+   middleware, not replaced by it) and unconditionally adding its own
+   credentials header. Combined with an exactly-matching reflected
+   `Access-Control-Allow-Origin`, this was the "any origin + credentials"
+   shape the Phase 5 spec explicitly prohibits. Fixed by having
+   `WidgetPublicCorsMiddleware` strip every inner `access-control-*` header
+   before setting its own. Regression coverage: `tests/test_widget_cors.py`.
+6. **A dropped-header bug in code untouched since Phase 1**:
+   `app/core/errors.py`'s central `HTTPException` handler rebuilds the
+   entire JSON response from scratch and, until now, never forwarded
+   `exc.headers` — invisible until the public widget's rate limiter (the
+   first place in this codebase to set `Retry-After` on a `429`) made it
+   observable: a live rate-limit test showed a `429` response missing the
+   header entirely. This affects any route using
+   `HTTPException(..., headers={...})`, not just Phase 5. Fixed by passing
+   `headers=exc.headers` through. Regression coverage:
+   `tests/test_widget_public_api.py::test_rate_limit_exceeded_returns_429_with_retry_after`.
+7. **A CSS specificity bug in the widget bundle**, found via live browser
+   screenshot inspection (not the jsdom-based widget test suite, which
+   asserts on the `hidden` *property* rather than computed `display`): the
+   `.error-banner` class's own `display: flex` and the element's `hidden`
+   attribute have equal CSS specificity, and source order let the class
+   win — a "hidden" error banner rendered as a visible empty colored bar.
+   Fixed by adding `.error-banner[hidden] { display: none; }`, matching the
+   pattern `.panel[hidden]` already used.
+8. **A related but distinct widget UI bug**, found immediately after fixing
+   #7: a *form's own* validation error was invisible while the form's
+   full-panel overlay covered the main error banner underneath it (a
+   `position: absolute; inset: 0` overlay rendered on top of it in the DOM).
+   Fixed by giving each structured action form its own local `.form-error`
+   element instead of sharing the main banner. Regression test added
+   (`ui.test.ts`: "shows a validation error inside the form overlay, not
+   the hidden main banner").
+
+### Live end-to-end verification (after all fixes)
+
+Performed against the real running dev stack (backend `AI_PROVIDER=mock`,
+frontend dev server, widget bundle served statically), driven through an
+actual browser (not simulated): registered a temporary real-estate tenant,
+configured a business profile/receptionist/FAQ, created and activated a
+widget installation for `localhost`, copied its embed snippet into
+`widget/demo/index.html`, and confirmed — all live, all real backend
+traffic —
+
+- The widget launcher and panel render via Shadow DOM with correct
+  branding, AI disclosure, privacy notice, and a persistent "Demo AI"
+  badge.
+- A grounded FAQ question streamed a real response with a real citation
+  (`retrieval.completed`/`response.completed.citations` both referencing
+  the seeded FAQ) through the complete public-API → orchestrator →
+  mock-provider pipeline.
+- Contact capture defaulted marketing consent to `false`; the response
+  shape didn't reveal whether a dedup match occurred.
+- An appointment request returned `status: "pending"` with explicit
+  "pending confirmation" wording, never "confirmed."
+- A handoff request returned an acknowledgement explicitly stating it does
+  not connect the visitor immediately, and repeated submissions returned
+  the same reference rather than duplicating.
+- Closing and reopening the panel, and a full page reload, both correctly
+  resumed the same conversation via the `sessionStorage`-persisted
+  capability token (`GET .../conversations/{id}` restoring the prior
+  transcript); a token from one session could not read another session's
+  conversation (`401`), and a token could not cross installations (`401`).
+- A disallowed Origin was rejected (`403`); a malformed Origin was rejected
+  (`403`); a missing Origin was let through (documented, deliberate); an
+  allowed Origin succeeded.
+- The handoff-request rate limit (5/hour) was exhausted live: exactly 5
+  requests succeeded, the 6th returned `429` with a `Retry-After` header
+  (after fixing bug #5 above).
+- A second tenant configured with the `clinic` industry template, sent an
+  urgent-language message through the **public** widget API (not just the
+  dashboard test console), correctly triggered the deterministic
+  clinic-emergency safety response (`safety_labels: ["clinic_urgent"]`,
+  explicit "don't wait for a reply here" language) — confirming the safety
+  engine's priority is not bypassable via the new public surface.
+- Captured contacts, enquiries, appointment requests, and handoff requests
+  were all verified present via the tenant-scoped, authenticated
+  widget-records API (the same one the dashboard page renders from), with
+  correct `conversation_id`/`receptionist_id`/`tenant_id` linkage and no
+  cross-tenant leakage (a second tenant's token against the first tenant's
+  records returned `404`).
+- `pg_stat_activity` showed exactly one idle (never "idle in transaction")
+  backend connection after the full session — no leaked connections or
+  held locks.
+- All E2E test data (two tenants, two users, and everything cascaded from
+  them) was deleted after verifying the database name
+  (`ai_receptionist_dev`); the four pre-existing Phase 1-4 tenants were
+  confirmed untouched throughout and afterward.
+
+No credentials, tokens, capability values, cookies, database URLs, or
+private conversation content are reproduced in this report, per the
+explicit constraint on this phase's verification.
+
+### Verification results (all passing, after every fix above)
+
+- Backend: `pytest` **317/317** passed (290 carried forward + 27 new: 23 in
+  `test_widget_public_api.py`, 4 in `test_widget_cors.py`), `ruff check`
+  clean, `mypy` clean (142 source files), `alembic current` at
+  `1aa533d3cabf (head)`, `alembic check` clean, full
+  upgrade → downgrade → upgrade cycle verified clean with zero orphaned
+  enum types and zero impact on pre-existing data.
+- Frontend: `npx vitest run` **87/87** passed (80 carried forward + 7 new
+  for the widget dashboard page), `eslint` clean, `tsc --noEmit` clean,
+  `next build` succeeded (new route `/dashboard/receptionist/widget`,
+  5.56 kB).
+- Widget: `npx vitest run` **36/36** passed (new suite), `eslint` clean,
+  `tsc --noEmit` clean, `tsc` build (type declarations) succeeded, `esbuild`
+  bundle succeeded — **25,888 bytes** minified IIFE, zero runtime
+  dependencies.
+
+### Known limitations (Phase 5)
+
+- `InMemoryRateLimiter` is single-process only (documented upgrade path to
+  a Redis-backed implementation of the same `Protocol`).
+- Domain allow-lists are exact-match only — no implicit `www.`/subdomain
+  expansion.
+- ~~The public appointment-request form has no structured service/location
+  picker yet~~ **Resolved in the Phase 5 follow-up round** — see below.
+- No automated deletion job exists yet — configurable retention **defaults**
+  now exist (see the follow-up round below) but every record type still
+  requires manual deletion today.
+- Browser voice makes no claim about where the browser/OS actually
+  performs speech recognition (on-device vs. a vendor's own cloud service)
+  — this application only guarantees it never uploads raw audio itself.
+- ~~The dashboard's widget-preview card is a configuration preview...~~
+  **Resolved in the Phase 5 follow-up round** — see below.
+
+### Phase 5 follow-up round (complete, awaiting commit approval)
+
+Phase 5 was provisionally accepted with six remaining requirements before
+final approval, all completed in this round without starting Phase 6:
+
+1. **Structured service/location pickers.** `GET .../config` now returns
+   `services`/`locations` (public-safe fields only: id, name, description,
+   location timezone — never tenant IDs or inactive records), filtered to
+   the resolved installation's own tenant. The widget's appointment form
+   shows `<select>`s only when data exists, with a leading "Not sure"
+   option. The server independently validates `service_id`/`location_id`:
+   rejects unknown, inactive, or cross-tenant identifiers, and enforces a
+   service's location restriction (auto-fills an omitted location, rejects
+   a conflicting one).
+2. **Real dashboard widget preview.** Replaced the configuration-only
+   preview card with a sandboxed same-origin iframe
+   (`frontend/public/widget-preview.html`) that loads the actual built
+   bundle against the installation's real public API and capability-token
+   flow, labeled "Live local preview — Mock AI". Preview traffic is tagged
+   via `visitor_reference="dashboard-preview"`; a `sessionNamespace` (fresh
+   UUID per "Restart preview" click) isolates each preview session's
+   `sessionStorage`. The platform's own origin is trusted via a new,
+   separate `PLATFORM_PREVIEW_ORIGINS` setting — never merged into any
+   tenant's `allowed_domains`. No dashboard JWT or cookie reaches the
+   widget: confirmed both architecturally (the widget's `fetch()` calls
+   never set `credentials: "include"`, so a cross-origin cookie is never
+   attached regardless of iframe sandboxing) and empirically (live
+   `document.cookie` read from inside the iframe during verification below).
+3. **Appointment date validation.** Rejects any date before "today",
+   computed in the selected location's timezone when one is chosen, or the
+   submitted (validated) timezone otherwise — accepts today and future
+   dates up to the existing 365-day ceiling.
+4. **Contact deduplication safety review.** Reviewed
+   `app/services/contact_service.py` against every stated failure mode
+   (cross-tenant leakage, overwriting trusted fields with unverified
+   conflicting values, silent consent downgrade). The existing
+   Phase-5-original implementation already satisfied all of them — this
+   was a review, not a rewrite. 14 new tests lock in the guarantee.
+5. **Retention defaults.** Five new `Settings` fields declare default
+   retention windows (visitor sessions 30d, conversations 90d,
+   contacts/enquiries 365d, appointment requests 180d, handoff requests
+   180d). No deletion job reads them yet — documented explicitly as
+   declared-defaults-only, with no compliance claim implied.
+6. **Report consistency.** The prior report's bug count ("six" naming seven
+   items) is corrected to an exact count of eight (see above). Confirmed
+   Phase 4's orchestrator gained additive `mode`/`channel` parameters in
+   Phase 5, not "unchanged" reuse as previously (incorrectly) stated —
+   Phase 4's own test suite and the multiconn suite both still pass in
+   full (see verification below).
+
+#### A ninth real bug, found live during this round's own verification
+
+**A visitor's browser can report a legacy IANA timezone alias the backend's
+tzdata build doesn't recognize**, breaking the widget's no-location-selected
+date-validation fallback. Live-testing "submit yesterday's date with no
+location selected" in the real dashboard preview produced `"'Asia/Calcutta'
+is not a recognized timezone"` instead of the expected past-date rejection.
+Root-caused directly: this backend's `zoneinfo.available_timezones()` build
+has neither `"Asia/Calcutta"` nor a constructible `ZoneInfo("Asia/Calcutta")`
+(`No time zone found with key Asia/Calcutta`), yet the browser sandbox's own
+`Intl.DateTimeFormat().resolvedOptions().timeZone` reports exactly that
+legacy alias. This is the same class of issue `docs/api.md` already
+documented for the dashboard's own timezone dropdown — but that path never
+hits it, because the dashboard only ever submits a value sourced from the
+backend's own `/timezones` list. The widget's appointment form had no
+equivalent guard for its browser-detected fallback. Fixed by adding
+`LEGACY_TIMEZONE_ALIASES`/`normalize_timezone()` to
+`app/core/timezones.py` (a small, explicitly non-exhaustive map of
+well-known legacy links) and applying it in
+`appointment_request_service.create_appointment_request()` before
+validation — matching the frontend's own pre-existing
+`normalizeTimezoneAlias()` pattern in `frontend/src/lib/timezones.ts`, which
+already covers this exact alias for the dashboard's registration flow.
+Confirmed fixed live (see below); regression coverage added:
+`test_legacy_timezone_alias_is_normalized_and_accepted` and
+`test_unrecognized_non_alias_timezone_is_still_rejected` in
+`tests/test_appointment_request_service.py`.
+
+This makes the corrected count **nine real bugs found and fixed across the
+full Phase 5 effort** (the original eight, documented above, plus this one
+found during the follow-up round's own live verification).
+
+#### Verification results (follow-up round, all passing)
+
+- Backend: 358 pytest passed (up from 340), including 11 explicit
+  `pytest -m multiconn` tests; Ruff clean; Mypy clean (142 source files);
+  `alembic current` at head, `alembic check` reports no undetected model
+  changes (this round made no schema changes).
+- Frontend: 91 Vitest passed (up from 77); ESLint clean; `tsc --noEmit`
+  clean; production build succeeds (26 static routes).
+- Widget: 40 Vitest passed; ESLint clean; `tsc --noEmit` clean; bundle
+  rebuilds successfully at 27,145 bytes (unchanged from the prior round —
+  this round's one code fix was backend-only).
+- Live browser verification: all 15 requested steps completed against the
+  real dashboard preview, the real widget bundle, and a live Postgres
+  database — see the full report delivered alongside this update for the
+  detailed results of each step, including the cross-tenant rejection,
+  capability-token enforcement, no-credential-leakage confirmation, and a
+  clean `pg_stat_activity`/`pg_locks` check (no lingering connections or
+  transactions from the session).
+- Test data cleanup: the two tenants created for this round's live E2E
+  testing (`Maple Dental Care`, `Other Business`) and their two associated
+  users were deleted via a verified `ai_receptionist_dev`-scoped, committed
+  transaction after confirming cascade deletion covers all tenant-scoped
+  data; the four pre-existing Phase 1-4 tenants were left untouched.
+
+### Revised Phase 5 commit message
+
+Nothing has been committed yet, so this supersedes the earlier draft above
+with one message covering the full, still-uncommitted Phase 5 changeset —
+original build plus the follow-up round.
+
+```
+Add public embeddable website widget, browser voice, and installation management (Phase 5)
+
+Implement the public widget API surface with its own capability-token
+authorization model, domain/origin validation, and a single-process rate
+limiter behind a replaceable interface — extending the Phase 4 conversation
+engine with additive mode/channel parameters (Phase 4's own suite and the
+multiconn suite both still pass in full). Add contact capture with explicit
+marketing-consent separation, local appointment-request and human-handoff
+records with pending/non-immediate visitor-facing wording, structured
+service/location pickers with cross-tenant/inactive validation, and
+dashboard pages for installation management, a real live-bundle preview,
+and record verification.
+
+Add the embeddable widget bundle itself: a dependency-free, Shadow-DOM
+TypeScript package with streaming chat, structured action forms, and
+browser-native voice, bundled with esbuild into one ~27KB IIFE.
+
+Add a dedicated non-credentialed CORS policy for the public widget path,
+timezone-aware and location-governed appointment date validation with a
+legacy-IANA-alias normalization guard, declared (not yet enforced) data
+retention defaults, and fix nine real bugs found via live testing —
+including a credential-leakage regression from the dashboard's credentialed
+CORS middleware, a dropped-header bug in the app-wide exception handler,
+and a widget bundle-URL path mismatch. See docs/PROGRESS.md for the full
+accounting.
+```
+
+**Awaiting explicit review and commit approval. Phase 6 has not been
+started.**

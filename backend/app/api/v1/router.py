@@ -13,6 +13,9 @@ from app.api.v1 import (
     services,
     tenants,
     timezones,
+    widget_installations,
+    widget_public,
+    widget_records,
 )
 
 api_router = APIRouter()
@@ -28,3 +31,6 @@ api_router.include_router(services.router, tags=["services"])
 api_router.include_router(faqs.router, tags=["faqs"])
 api_router.include_router(knowledge.router, tags=["knowledge"])
 api_router.include_router(conversations.router, tags=["conversations"])
+api_router.include_router(widget_installations.router, tags=["widget-installations"])
+api_router.include_router(widget_records.router, tags=["widget-records"])
+api_router.include_router(widget_public.router, tags=["widget-public"])

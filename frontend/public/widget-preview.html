@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Widget preview</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #fafafa;
+  }
+  #preview-banner {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    padding: 6px 12px;
+    background: #fef3c7;
+    color: #78350f;
+    font-size: 12px;
+    font-weight: 600;
+    text-align: center;
+    z-index: 2147483647;
+    border-bottom: 1px solid #fde68a;
+  }
+  #preview-error {
+    margin: 48px 16px 0;
+    padding: 12px;
+    background: #fdecea;
+    color: #a12a2a;
+    border-radius: 6px;
+    font-size: 13px;
+    display: none;
+  }
+</style>
+</head>
+<body>
+  <!--
+    This page is served from the dashboard's own origin specifically so the
+    backend's public-widget CORS policy can trust it as a known platform
+    preview origin (see Settings.platform_preview_origins /
+    app/api/widget_deps.validate_widget_origin) without that origin ever
+    being written into any tenant's own WidgetInstallation.allowed_domains.
+    It embeds the SAME production widget bundle a real customer page would,
+    with no special "preview mode" code path in the widget itself — the
+    only differences are two optional, additive data-* attributes
+    (data-visitor-reference, data-session-namespace) that mark this
+    session's traffic and let "Restart preview" force a fresh conversation.
+    This page never touches the dashboard's access token, refresh cookie,
+    or CSRF cookie — it has no code that reads or references any of them.
+  -->
+  <div id="preview-banner">Live local preview — Mock AI</div>
+  <div id="preview-error" role="alert"></div>
+
+  <script>
+    (function () {
+      var params = new URLSearchParams(window.location.search);
+      var publicId = params.get("publicId");
+      var apiBaseUrl = params.get("apiBaseUrl");
+      var bundleUrl = params.get("bundleUrl");
+      var sessionNamespace = params.get("sessionNamespace");
+
+      if (!publicId || !apiBaseUrl || !bundleUrl) {
+        var errorEl = document.getElementById("preview-error");
+        errorEl.textContent = "Missing publicId, apiBaseUrl, or bundleUrl query parameter.";
+        errorEl.style.display = "block";
+        return;
+      }
+
+      var script = document.createElement("script");
+      script.src = bundleUrl;
+      script.async = true;
+      script.setAttribute("data-receptionist-id", publicId);
+      script.setAttribute("data-api-base-url", apiBaseUrl);
+      script.setAttribute("data-visitor-reference", "dashboard-preview");
+      if (sessionNamespace) {
+        script.setAttribute("data-session-namespace", sessionNamespace);
+      }
+      script.onerror = function () {
+        var errorEl = document.getElementById("preview-error");
+        errorEl.textContent =
+          "Could not load the widget bundle from " + bundleUrl + ". Is it built and being served?";
+        errorEl.style.display = "block";
+      };
+      document.body.appendChild(script);
+    })();
+  </script>
+</body>
+</html>

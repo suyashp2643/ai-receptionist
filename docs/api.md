@@ -1,4 +1,4 @@
-# API Reference (Phase 4)
+# API Reference (Phase 5)
 
 Base path: `/api/v1`. Full interactive docs at `/docs` (Swagger UI) when the
 backend is running. See `docs/security.md` for the auth/CSRF model these
@@ -27,6 +27,15 @@ from this endpoint rather than the browser's own
 "backward"-compatibility link names (e.g. `Asia/Calcutta`, `Europe/Kiev`)
 that this backend's tzdata build does not accept — anything rendered from
 this endpoint is guaranteed to pass every `timezone` validator below.
+
+The public widget's appointment form has no equivalent backend-sourced
+picker to sidestep this with (see its own section below) — it falls back to
+the visitor's raw browser-detected timezone when no location is selected,
+so the appointment-request endpoint instead normalizes a short, explicit
+list of known legacy aliases (`app/core/timezones.py`'s
+`LEGACY_TIMEZONE_ALIASES`) before validating, catching the same class of
+value (e.g. `Asia/Calcutta` → `Asia/Kolkata`) this endpoint's own consumers
+avoid by construction.
 
 ## Auth
 
@@ -335,6 +344,212 @@ placeholder.
   `list_services`, `get_business_hours`, `get_business_profile`) — no
   write-action tool exists or can be invoked in Phase 4.
 
+## Widget installation management (dashboard, authenticated) (Phase 5)
+
+| Method | Path | Minimum role |
+|---|---|---|
+| GET, POST | `/api/v1/tenants/{tenant_id}/widget-installations` | member (GET) / `admin` (POST) |
+| GET, PATCH | `/api/v1/tenants/{tenant_id}/widget-installations/{id}` | member (GET) / `admin` (PATCH) |
+| GET | `/api/v1/tenants/{tenant_id}/widget-installations/{id}/embed-snippet` | member |
+| POST | `/api/v1/tenants/{tenant_id}/widget-installations/{id}/activate` | `admin` |
+| POST | `/api/v1/tenants/{tenant_id}/widget-installations/{id}/pause` | `admin` |
+| POST | `/api/v1/tenants/{tenant_id}/widget-installations/{id}/revoke` | `admin` |
+
+**`POST .../widget-installations`** — `{ "receptionist_id": "...", "allowed_domains": ["example.com"] }`.
+Starts in `status: "draft"` (serves no public traffic until activated).
+`allowed_domains` are normalized bare hostnames — no scheme/path/port,
+no wildcards, `localhost` only when the backend's `ENVIRONMENT=development`
+(`422` otherwise); see `docs/security.md`'s domain-validation section.
+`receptionist_id` must belong to the same tenant (`404` otherwise).
+
+**`GET .../embed-snippet`** — returns the installation fields plus
+`embed_snippet` (the literal `<script>` tag to paste) and `widget_bundle_url`
+(`Settings.widget_bundle_url`, a local dev URL by default — Phase 5 does not
+claim production widget-bundle hosting exists).
+
+**Revocation is terminal**: `POST .../revoke` cannot be undone via
+`activate` (`409`) — a tenant that wants the widget back creates a new
+installation, which mints a new `public_id`. This is deliberate: the old
+`public_id` may already be cached or scraped from a page's source, so
+reviving it would silently un-revoke something a tenant explicitly turned
+off.
+
+**Live local preview** (`/dashboard/receptionist/widget`, no separate REST
+endpoint of its own — it composes the routes above with the public widget
+API): renders `frontend/public/widget-preview.html` in a sandboxed iframe,
+using `embed-snippet`'s real `widget_bundle_url` and the installation's real
+`public_id` — the actual production widget bundle against the actual public
+API, not a mock or a separate code path. See docs/architecture.md for the
+full design (platform preview origin trust, capability-token flow, preview
+traffic tagging, and why no dashboard credential ever reaches it).
+
+## Widget records — minimal verification views (dashboard, authenticated) (Phase 5)
+
+| Method | Path | Minimum role |
+|---|---|---|
+| GET | `/api/v1/tenants/{tenant_id}/widget-records/contacts` | member |
+| GET | `/api/v1/tenants/{tenant_id}/widget-records/enquiries` | member |
+| GET | `/api/v1/tenants/{tenant_id}/widget-records/appointment-requests` | member |
+| GET | `/api/v1/tenants/{tenant_id}/widget-records/handoff-requests` | member |
+
+Read-only, paginated (`limit`/`offset`, default 50, capped at 200), newest
+first. This is deliberately **not** the full Phase 6 analytics dashboard —
+just enough to verify that a widget conversation's captured contact,
+enquiry, appointment request, or handoff request actually landed in the
+tenant's own records.
+
+## Public widget API (unauthenticated beyond a capability token) (Phase 5)
+
+Base path: `/api/v1/widget/{public_id}`. No dashboard JWT is ever required
+or accepted here. `public_id` is `WidgetInstallation.public_id` — public and
+non-secret by design (see `docs/security.md`'s threat model for the full
+security model this section assumes). CORS for this path is handled by a
+separate, non-credentialed policy (`app/core/widget_cors.py`) — see
+`docs/security.md`.
+
+| Method | Path | Requires capability token |
+|---|---|---|
+| GET | `.../config` | no |
+| POST | `.../sessions` | no (this is what issues one) |
+| POST | `.../conversations` | yes (an *existing* token, to start an additional conversation) |
+| GET | `.../conversations/{conversation_id}` | yes |
+| POST | `.../conversations/{conversation_id}/messages` | yes |
+| POST | `.../contacts` | yes |
+| POST | `.../appointment-requests` | yes |
+| POST | `.../handoff-requests` | yes |
+
+A capability token is presented via the `X-Widget-Session-Token` header
+(never a cookie, never a query parameter). `/contacts`,
+`/appointment-requests`, and `/handoff-requests` take no `conversation_id`
+in the path — the token alone determines the conversation, since a
+`WidgetVisitorSession` is always scoped 1:1 to exactly one conversation.
+
+**`GET .../config`** → `WidgetConfigRead` — every field is explicitly
+public-safe (business name, receptionist name, welcome message, suggested
+questions, logo/accent color, supported languages, voice availability,
+theme, launcher position, AI disclosure, privacy notice, `mock_mode: true`,
+safe business contact email/phone, installation `status` so a
+paused/draft widget can render an accurate "unavailable" state, and —
+added after initial Phase 5 review — `services`/`locations`, each an array
+of **active-only** records with only `id`/`name`/`description` (services)
+or `id`/`name`/`timezone` (locations); an empty array when none are
+configured, so the widget only renders a picker when there's something to
+pick). Never includes a tenant or receptionist UUID, system prompt, private
+knowledge content, credentials, service pricing/category, or any other
+tenant's data. `404` for an unknown or **revoked** `public_id` (revoked
+behaves exactly like "never existed" — it does not confirm the `public_id`
+once worked). Origin is validated here too (see `docs/security.md`) but a
+missing Origin is let through; the dashboard's own origin
+(`PLATFORM_PREVIEW_ORIGINS`) is always allowed, for the live preview
+feature, regardless of a tenant's configured `allowed_domains`.
+
+**`POST .../sessions`** — body `{ "visitor_reference"?: "...", "locale"?: "en" }`
+(same shape as the dashboard's `StartConversationRequest` — no
+widget-specific fields needed). Requires the installation to be `active`
+(`409` for draft/paused/revoked — draft/paused still serve `GET .../config`,
+just not this). Starts a new `Conversation` with
+`mode="widget", channel="widget"` (additive enum values — Phase 4's
+dashboard test-console conversations still default to `mode="test",
+channel="dashboard_test"`, unaffected) and a `WidgetVisitorSession`.
+Response:
+```json
+{
+  "capability_token": "<raw token — shown exactly once>",
+  "expires_at": "2026-01-02T00:00:00Z",
+  "conversation": { "id": "...", "status": "active", "locale": "en", "qualification_complete": false, "started_at": "...", "last_message_at": null }
+}
+```
+Note `conversation` here is `WidgetConversationRead` — it never includes
+`tenant_id` or `receptionist_id`, unlike the dashboard's `ConversationRead`.
+
+**`POST .../conversations`** — same body and response shape as `/sessions`,
+but requires an existing, still-valid capability token from this same
+installation (header, not body) as proof the caller already completed the
+domain-gated `/sessions` handshake once. This is the "start a new
+conversation" action from within an already-open widget (the transcript's
+"＋" button), not a general-purpose unauthenticated conversation factory —
+it mints a brand-new conversation and token, independent of the one
+presented.
+
+**`GET .../conversations/{conversation_id}`** → `{ conversation, messages }`,
+`messages` filtered to `user`/`assistant` roles only (tool-call audit rows
+are never serialized here). `401` for a missing/invalid/expired/revoked
+token or one scoped to a different conversation — the same generic message
+in every case (see `docs/security.md`).
+
+**`POST .../conversations/{conversation_id}/messages`** — identical SSE
+contract to the dashboard's `POST .../test-conversations/{id}/messages`
+(see that section above) — reuses the same `ConversationOrchestrator` and
+streaming adapter unchanged. `409` if the conversation is not active, or if
+it has reached `Settings.widget_max_messages_per_conversation` (default
+200). Rate-limited separately from session creation (see
+`docs/security.md`).
+
+**`POST .../contacts`** — body: `{ "name"?, "email"?, "phone"?, "preferred_contact_method"?: "email"|"phone"|"either", "marketing_consent"?: false }`.
+`422` if none of name/email/phone is provided. Response:
+`{ "status": "received", "contact_id": "...", "marketing_consent": false }`
+— identical shape whether or not this matched an existing contact (see
+`docs/security.md`'s consent section).
+
+**`POST .../appointment-requests`** — body:
+```json
+{
+  "requested_date": "2026-03-01",
+  "requested_time"?: "14:00:00",
+  "requested_time_window"?: "morning",
+  "timezone": "America/New_York",
+  "notes"?: "...",
+  "idempotency_key"?: "...",
+  "contact"?: { "name"?, "email"?, "phone"?, "preferred_contact_method"?, "marketing_consent"? },
+  "service_id"?: "<uuid, from GET .../config's services[]>",
+  "location_id"?: "<uuid, from GET .../config's locations[]>"
+}
+```
+`contact` is optional inline capture — if omitted, the request is linked to
+whatever contact (if any) was already captured earlier in this same
+conversation. `service_id`/`location_id` are optional (a visitor may pick
+"Not sure" for either or both) and always re-validated server-side against
+the resolved tenant regardless of what the config response listed —
+`422` for an unknown id, an id belonging to a different tenant, or an
+**inactive** service/location (inactive is treated as "not found," not
+surfaced as a distinct error, matching the "never expose inactive records"
+rule). If the selected service is itself restricted to one location
+(`Service.location_id` set), a conflicting `location_id` is rejected
+(`422`) and an omitted one is auto-filled from the service's own location.
+
+**Date validation is timezone-aware, not UTC-as-a-proxy-for-local**: the
+"today" boundary is computed from the *selected location's* IANA timezone
+when one is chosen, falling back to the submitted `timezone` field
+otherwise — never the server's or a browser's local clock. The submitted
+value is normalized against a small known-legacy-alias map (see
+"Timezones" above) and then validated as a real IANA name; `422` for a date
+before the governing timezone's "today," for a `timezone` string that's
+still unrecognized after normalization, or for a date more than 365 days
+out.
+
+Response always includes `status: "pending"` and a `message`
+field containing the exact "pending confirmation" visitor-facing wording —
+see `docs/security.md`. `reference` is the request's own UUID (non-sequential,
+safe to show), not an internal sequential ID.
+
+**`POST .../handoff-requests`** — body: `{ "reason": "...", "urgency"?: "...", "idempotency_key"?: "...", "contact"?: {...} }`.
+Same inline-contact behavior as appointment requests. Repeated submissions
+from the same conversation while a handoff is still `open` return the same
+`reference` rather than creating duplicates. Response `message` explicitly
+states this does not connect the visitor immediately — see
+`docs/security.md`. Never bypasses or is reachable in place of the safety
+engine's clinic-emergency response (verified live).
+
+### Public widget error shape and safety
+
+Same `{ "error": { "message": "...", "status_code": ... } }` shape as every
+other route. Public widget errors never include a raw provider error,
+stack trace, or any detail that would reveal whether an unrelated
+conversation/contact exists. `429 Too Many Requests` includes a
+`Retry-After` header (seconds until the limiting window resets) — see
+`docs/security.md` for a bug that once silently dropped this header on
+every route, not just this one.
+
 ## Error shape
 
 Every error response (from `app/core/errors.py`) has the same shape:
@@ -344,12 +559,18 @@ Every error response (from `app/core/errors.py`) has the same shape:
 (422 validation errors additionally include `"details": [...]` — the
 Pydantic error list, safely JSON-encoded via `jsonable_encoder`.)
 
-## Not implemented in Phase 4
+## Not implemented in Phase 5
 
-The public embeddable widget conversation endpoint, browser voice, telephone
-calling, WhatsApp/SMS, live/public (unauthenticated) conversations, actual
-appointment/lead/handoff execution, CRM integrations, billing, production
-analytics, and any Revenue Brain / AI Sales Employee integration — all
-later, explicitly-approved phases. A real (non-mock) provider's HTTP calls,
-embeddings, website crawling, document parsing, and voice are likewise still
-out of scope.
+Production analytics dashboards, billing/subscriptions, actual telephone
+calls, Twilio, WhatsApp/SMS, live calendar booking (appointment requests are
+always `pending`, never auto-confirmed — structured service/location
+*selection* is implemented, but selecting one is never a real availability
+check), sending real email, CRM synchronization, Revenue Brain / AI Sales
+Employee integration, paid AI provider usage by default, an automated data-
+retention/deletion job (defaults are declared and configurable; nothing
+executes them yet — see `docs/security.md`), and any public marketing site
+or Phase 7 industry-demo landing pages — all later, explicitly-approved
+phases. A real (non-mock) provider's HTTP calls, embeddings, website
+crawling, document parsing, and server-side voice processing are likewise
+still out of scope; browser-native voice (Web Speech API) is implemented in
+the widget bundle only, with no server-side counterpart.

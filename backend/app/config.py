@@ -74,9 +74,67 @@ class Settings(BaseSettings):
     retrieval_result_limit: int = 5
     sse_heartbeat_seconds: float = 15.0
 
+    # --- Public widget (Phase 5) ---
+    # A visitor capability token's lifetime — independent of the dashboard
+    # JWT's access_token_ttl_minutes above. Deliberately longer than a
+    # dashboard session since a widget visitor may leave a tab open for a
+    # while mid-conversation; still bounded, and always revocable via
+    # WidgetVisitorSession.revoked_at.
+    widget_visitor_session_ttl_hours: int = 24
+    # Hard ceiling on messages in one widget conversation — bounds worst-case
+    # per-conversation cost/storage regardless of rate limiting.
+    widget_max_messages_per_conversation: int = 200
+    # Where the embeddable widget bundle is served from — used both for the
+    # dashboard's "copy embed code" snippet AND its live local preview
+    # iframe (see docs/architecture.md), which actually fetches this URL.
+    # Phase 5 ships no production hosting: this defaults to a local dev URL
+    # matching docs/local-development.md's documented
+    # `cd widget && python3 -m http.server 5174` command — which serves the
+    # whole `widget/` directory, putting the built bundle at `/dist/widget.js`
+    # relative to that root, not bare `/widget.js`. A real deployment would
+    # typically serve `dist/widget.js` at a bare URL root (e.g. a CDN), so
+    # this is a dev-only path, not a production convention. The
+    # dashboard/docs must not claim production bundle hosting exists until
+    # one is actually deployed.
+    widget_bundle_url: str = "http://localhost:5174/dist/widget.js"
+    # See app/core/client_identity.py's docstring — only set True when a
+    # trusted proxy in front of this app sets (and strips any inbound)
+    # X-Forwarded-For itself.
+    trust_proxy_headers: bool = False
+    # The dashboard's own origin(s) — trusted for the "live local preview"
+    # feature (app/dashboard/receptionist/widget) regardless of what a
+    # tenant has configured in their own WidgetInstallation.allowed_domains.
+    # Deliberately a SEPARATE setting from cors_allow_origins (even though
+    # they hold the same value in this deployment): one governs the
+    # dashboard-API's own CORS policy, the other is a widget-specific,
+    # platform-level trust decision — conflating them would make a future
+    # change to one silently change the other. Never merged into any
+    # tenant's allowed_domains; see app/api/widget_deps.validate_widget_origin.
+    platform_preview_origins: str = "http://localhost:3000"
+
+    # --- Data retention defaults (Phase 5) ---
+    # These are DECLARED DEFAULTS ONLY — no scheduled job or code path in
+    # this codebase currently reads or acts on them to delete anything.
+    # Every record type below requires manual deletion today (see
+    # docs/security.md's "Retention" section for the full, honest
+    # accounting of what that means operationally). They exist now so a
+    # future deletion job has one already-reviewed, tenant-independent
+    # place to read defaults from, rather than each such job inventing its
+    # own number. None of these values implies, and nothing in this
+    # product claims, compliance with any data-protection regulation.
+    widget_visitor_session_retention_days: int = 30
+    widget_conversation_retention_days: int = 90
+    contact_and_enquiry_retention_days: int = 365
+    appointment_request_retention_days: int = 180
+    handoff_request_retention_days: int = 180
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()]
+
+    @property
+    def platform_preview_origins_list(self) -> list[str]:
+        return [origin.strip() for origin in self.platform_preview_origins.split(",") if origin.strip()]
 
     @property
     def resolved_cookie_secure(self) -> bool:

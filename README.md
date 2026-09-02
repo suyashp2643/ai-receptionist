@@ -5,11 +5,13 @@ industry templates (real estate, clinics, hotels, restaurants, automotive,
 law firms, education, home services, SaaS, custom) configure it via data,
 not forked code.
 
-Status: **Phase 4 — grounded AI conversation engine (mock provider, private
-test console)**. See
+Status: **Phase 5 — public embeddable website widget, browser voice, secure
+public conversations, contact capture, appointment requests, human handoff,
+and installation management**. See
 [docs/PROGRESS.md](docs/PROGRESS.md) for what's implemented so far,
 [docs/architecture.md](docs/architecture.md) for the system design, and
-[docs/security.md](docs/security.md) for the auth/tenant-isolation model.
+[docs/security.md](docs/security.md) for the auth/tenant-isolation/public-widget
+threat model.
 
 ## Stack
 
@@ -17,13 +19,21 @@ test console)**. See
 - Backend: FastAPI, Pydantic v2, SQLAlchemy 2.x, Alembic (Python 3.12)
 - Auth: Argon2id password hashing, JWT access tokens, rotating opaque refresh tokens
 - Database: PostgreSQL (required from Phase 2 for auth/tenant endpoints; optional for `/health`)
-- Cache/queue: Redis (optional; not required until later phases)
-- Widget: embeddable TypeScript package (foundation only so far)
+- Cache/queue: Redis (optional; not required — the public widget's rate
+  limiter ships an in-process, single-process implementation behind a
+  Protocol a future Redis adapter can satisfy without call-site changes)
+- Widget (Phase 5): dependency-free embeddable TypeScript package, bundled
+  with esbuild into one ~25KB IIFE (`widget/dist/widget.js`) — Shadow DOM
+  UI, SSE streaming, browser-native voice (Web Speech API), contact/
+  appointment/handoff forms
 - AI conversation engine (Phase 4): provider-abstracted, defaults to a
   deterministic zero-cost mock provider — real providers (OpenAI, Anthropic)
-  exist only as disabled adapters until credentials are configured
-- Zero-cost by design through Phase 4: no paid APIs, no external embeddings — deterministic
-  local chunking + PostgreSQL full-text search for knowledge, deterministic mock AI provider
+  exist only as disabled adapters until credentials are configured; the
+  public widget (Phase 5) reuses this engine unchanged
+- Zero-cost by design through Phase 5: no paid APIs, no external embeddings,
+  no telephony/SMS/email providers — deterministic local chunking +
+  PostgreSQL full-text search for knowledge, deterministic mock AI provider,
+  browser-native (not server-side) voice
 
 ## Repository layout
 

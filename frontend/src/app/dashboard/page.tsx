@@ -92,6 +92,9 @@ export default function DashboardPage() {
             <Link href="/dashboard/receptionist/test" className="text-sm underline">
               Open the private test console (mock AI demonstration)
             </Link>
+            <Link href="/dashboard/receptionist/widget" className="text-sm underline">
+              Manage your website widget (installation, preview, captured records)
+            </Link>
           </section>
         )}
 

@@ -495,3 +495,293 @@ replaceable without touching route/service code elsewhere:
 Tenant/membership/role logic (`TenantMember`, `require_tenant_role`,
 `TenantScopedRepository`) is independent of all three and would not need to
 change at all.
+
+## Public widget threat model (Phase 5)
+
+The public widget API (`/api/v1/widget/{public_id}/...`, `app/api/v1/widget_public.py`)
+is the first surface in this codebase reachable by a caller who has never
+authenticated as a dashboard user — anyone who can load the embed snippet on
+any web page. Its security model is deliberately layered, and none of the
+layers is trusted alone:
+
+| Layer | What it does | What it is NOT |
+|---|---|---|
+| `public_id` (`WidgetInstallation.public_id`) | Resolves which tenant/receptionist/config a request targets | Not a secret — it appears in every embedding page's HTML source by design. Revocable, but knowing it grants no access on its own. |
+| Origin header validation (`app/api/widget_deps.validate_widget_origin`) | Abuse reduction: rejects a present-but-disallowed or malformed Origin | **Not authentication.** A non-browser client can omit or forge Origin entirely; a missing Origin is deliberately let through (see "Domain validation limitations" below). |
+| Visitor capability token (`WidgetVisitorSession.token_hash`) | The actual authorization boundary for reading or writing one specific conversation | Not derivable from `public_id` or Origin; opaque, random, hashed at rest, scoped to exactly one `(installation, conversation)` pair, expiring, revocable. |
+| Rate limiting (`app/core/rate_limit.py`) | Abuse/cost bounding | Not a security boundary — a determined attacker with many source IPs is not stopped by it; see its own limitation below. |
+
+**Never accepted from a public-widget request, at any layer:** a tenant
+UUID, receptionist UUID, role, internal workflow/config, enabled-tools list,
+or safety rules. Every one of these is resolved server-side starting only
+from `public_id` and (where applicable) the capability token — mirroring the
+existing rule that dashboard routes never trust a client-supplied
+`tenant_id`/role, extended to a surface with no dashboard session at all.
+
+**Never exposed in a public widget config or conversation response:** the
+tenant's internal UUID, receptionist UUID, system prompt, private knowledge
+document content, API credentials/integration config, member details,
+private analytics, or any other conversation's content. `WidgetConfigRead`
+(`app/schemas/widget_public.py`) is an explicit allow-list of fields, not a
+filtered view of an internal model — there is no field on it that isn't
+meant to be public.
+
+### Visitor capability-token lifecycle
+
+1. **Issuance** (`app/services/widget_visitor_session_service.issue_session`):
+   `secrets.token_urlsafe(32)` generated once, returned to the browser in the
+   `POST .../sessions` or `POST .../conversations` response body exactly
+   once. Only its SHA-256 hash (`hash_visitor_capability_token`, identical
+   pattern to `RefreshToken.token_hash`) is ever persisted. The raw value is
+   never logged, and `WidgetVisitorSession.__repr__` deliberately omits it.
+2. **Presentation**: every subsequent request presents the raw token in the
+   `X-Widget-Session-Token` header (not a cookie — the widget never sends
+   cookies to this API at all, see the CORS section below).
+3. **Verification** (`resolve_session_by_token`): the presented token is
+   rehashed and looked up; the caller must additionally match the specific
+   `widget_installation_id` (and, where a route operates on one, the exact
+   `conversation_id`) the session was issued for. A token valid for
+   conversation A can never be used to read or write conversation B, even
+   under the same installation or tenant — enforced by the query itself, not
+   by an application-level `if` a future change could accidentally remove.
+4. **Expiry and revocation**: `expires_at` (`Settings.widget_visitor_session_ttl_hours`,
+   default 24h) and `revoked_at` are both checked on every use;
+   `InvalidCapabilityTokenError` is raised identically for "unknown token",
+   "expired", "revoked", and "wrong installation/conversation" — the public
+   API returns the same generic `401` for all of them (never a response
+   shape that would let a caller distinguish "this token once worked" from
+   "this token never existed").
+5. **Client-side persistence**: the widget bundle stores the raw token in
+   `sessionStorage`, scoped per `public_id` (`widget/src/storage.ts`) — not
+   `localStorage`, so it does not survive a full browser restart, and not a
+   cookie, so it is never sent automatically to any other origin.
+
+### Domain validation limitations (accepted, documented)
+
+`app/core/domain_validation.py` normalizes and validates `allowed_domains` at
+write time (bare hostnames only — no scheme/path/port/userinfo/wildcard;
+`localhost` accepted only when `Settings.environment == "development"`). At
+request time, `validate_widget_origin`:
+
+- Rejects a **present** Origin whose hostname doesn't match the
+  installation's `allowed_domains` (exact match only — no implicit `www.`
+  or subdomain expansion; a tenant serving from both must list both).
+- **Lets a missing Origin through.** This is deliberate, not an oversight: a
+  non-browser client can omit Origin entirely regardless of what this check
+  does, so blocking on absence would only inconvenience legitimate
+  non-browser testing (curl, the live-E2E scripts used to verify this phase)
+  without stopping a determined caller. The real authorization for any
+  conversation-scoped action is always the capability token, never Origin.
+- Rejects a **malformed** (present but unparseable) Origin outright, since a
+  real browser embed always sends a well-formed one.
+
+### Rate-limiter limitations (accepted, documented)
+
+`InMemoryRateLimiter` (`app/core/rate_limit.py`) is a fixed-window counter
+held in **one process's memory**. It does not coordinate across multiple
+backend worker processes or instances — a deployment running N workers
+effectively multiplies every configured limit by N. A Redis-backed
+implementation of the same `RateLimiter` Protocol is the intended upgrade
+path (the interface is already shaped for it); this is an accepted,
+zero-cost-appropriate limitation for Phase 5, not a design dead end. Keys
+combine action type + installation `public_id` + a **truncated SHA-256 hash**
+of the caller's IP (`app/core/client_identity.py`) — never the raw IP, and
+never trusted from `X-Forwarded-For` unless `Settings.trust_proxy_headers`
+is explicitly enabled behind a real trusted proxy (default `False`, so a
+visitor cannot forge their way past IP-based limiting by default). A
+conversation's total message count is bounded separately and permanently
+(`Settings.widget_max_messages_per_conversation`, default 200), independent
+of the rolling rate-limit windows.
+
+### Contact capture and consent
+
+`app/services/contact_service.py` treats "provided contact details to get a
+reply" and "opted into marketing" as structurally distinct: `marketing_consent`
+is a separate boolean, defaulted `False` everywhere (the widget's checkbox
+renders unticked), and `consent_captured_at` is set only on an explicit
+`True` — never inferred from the mere presence of a name/email/phone.
+Dedup is tenant-scoped and best-effort (normalized email, then normalized
+phone); a match updates the existing row rather than creating a duplicate,
+and the public API's response shape is identical whether or not a match
+occurred (`{"status": "received", ...}`) — a caller cannot use the contact
+endpoint to probe whether a given email/phone already exists in a tenant's
+data.
+
+### Appointment-request and handoff semantics
+
+Both are **local-only requests**, never confirmed bookings or live
+connections — Phase 5 has no calendar or telephony integration:
+
+- `AppointmentRequest.status` defaults to, and Phase 5 never programmatically
+  advances it past, `pending`. Every visitor-facing string
+  (`app/schemas/widget_public.WidgetAppointmentRequestResponse.message`) says
+  "pending confirmation" / "the business will confirm availability" —
+  verified live (see docs/PROGRESS.md's E2E report) that the widget never
+  renders the word "confirmed" for a request that hasn't been.
+  `app/services/appointment_request_service._validate_requested_date` rejects
+  dates more than one day in the past (a generous allowance for timezone
+  rounding, not a real backdating window) or more than a year out.
+- `HumanHandoff` records a request only — nothing in Phase 5 places a call,
+  sends a message, or notifies anyone. Its acknowledgement text explicitly
+  states it "does not connect you immediately." Repeated rapid submissions
+  from the same conversation return the same open handoff rather than
+  creating duplicates (`human_handoff_service.create_handoff_request`).
+  Both endpoints additionally support an idempotency key for the same
+  reason Phase 4's message endpoint does — a retried request must never
+  create two records.
+- Neither endpoint can ever bypass the safety engine's clinic-emergency
+  response: the orchestrator evaluates safety independently, before any
+  action-recommendation logic runs, and nothing in the handoff/appointment
+  code path checks or short-circuits that evaluation. Verified live with a
+  real clinic-template receptionist and an urgent-language message sent
+  through the public widget API (see docs/PROGRESS.md).
+
+### Browser voice — privacy and limitations
+
+`widget/src/voice.ts` uses only the browser's own `SpeechRecognition`/
+`webkitSpeechRecognition` (STT) and `speechSynthesis` (TTS) — there is no
+server-side audio processing and no audio-upload endpoint anywhere in this
+API. Only the resulting **text** transcript is ever sent to the backend, via
+the same message-send call as typed text; raw audio never leaves the
+browser and is never stored. The widget does **not** claim speech processing
+happens "locally" or "on-device" — that is entirely up to the browser/OS
+vendor's own implementation (some route through a cloud STT service), which
+this codebase has no way to verify or control, so the UI and this
+documentation are deliberately silent on where processing happens, only on
+what this application does with the result. Microphone permission is
+requested only after an explicit user click (the mic button), never
+automatically; at most one `SpeechRecognition` instance runs at a time
+(`VoiceRecognizer.isActive` guards `start()`); recognition and any in-progress
+speech synthesis are both stopped when the panel closes.
+
+### CORS — a separate policy for a fundamentally different trust model
+
+`app/main.py`'s dashboard `CORSMiddleware` (`Settings.cors_allow_origins`,
+`allow_credentials=True`) is correct for the dashboard, which is only ever
+called from this product's own frontend at a small, fixed set of origins
+known at deploy time. The public widget API cannot use the same policy: it
+is, by design, embedded on arbitrary third-party customer domains that are
+only known at *runtime* (`WidgetInstallation.allowed_domains`, stored per
+tenant in the database) — a static app-config allow-list can never enumerate
+them in advance, and a request from a legitimate customer's site would
+otherwise be silently rejected by the browser before this API's own
+Origin/token checks ever ran.
+
+`app/core/widget_cors.WidgetPublicCorsMiddleware` handles
+`/api/v1/widget/*` requests separately: it reflects the request's Origin
+back as `Access-Control-Allow-Origin` and never sets
+`Access-Control-Allow-Credentials`. This is safe specifically *because* the
+widget API never uses cookies — it authenticates via the
+`X-Widget-Session-Token` header, so there is no session for a malicious page
+to ride on even if it could read the response. Reflecting Origin without
+credentials is the standard, safe shape for a public, non-credentialed API;
+it is not the "wildcard + credentials" anti-pattern, which requires both
+elements together.
+
+**Three real bugs found via live browser testing during Phase 5, not the
+unit suite** (none of the automated tests below alone would have caught a
+browser-enforced CORS failure, since `TestClient` doesn't enforce CORS the
+way a real browser does):
+
+1. **No CORS handling existed at all for `/api/v1/widget/*`** at first —
+   every widget request from the actual demo host page was blocked by the
+   browser before reaching the server, because the dashboard's
+   `CORSMiddleware` only allows `http://localhost:3000`. Fixed by adding
+   `WidgetPublicCorsMiddleware`.
+2. **Middleware ordering**: `app.add_middleware()` makes the
+   *most-recently-added* middleware outermost (confirmed empirically, not
+   assumed — the first attempt added the widget middleware before
+   `CORSMiddleware` and its OPTIONS preflight handling was never reached,
+   intercepted instead by `CORSMiddleware`'s own fixed-origin preflight
+   rejection). Fixed by adding `WidgetPublicCorsMiddleware` after
+   `CORSMiddleware`.
+3. **Credential leakage**: even after fixing ordering, a live curl check
+   against a disallowed origin showed `Access-Control-Allow-Credentials:
+   true` on a widget response *alongside* the widget middleware's own
+   reflected-origin header — the inner `CORSMiddleware` was still running
+   for every widget request (it wraps *inside* the widget middleware, not
+   replaced by it) and unconditionally adding its own credentials header.
+   Combined with an exactly-matching reflected `Access-Control-Allow-Origin`,
+   this was the literal "any origin + credentials" shape prohibited above.
+   The dashboard's refresh cookie's `Path=/api/v1/auth` scoping happened to
+   prevent practical exploitation, but relying on that would be fragile
+   defense-in-depth. Fixed by having `WidgetPublicCorsMiddleware` strip every
+   `access-control-*` header the inner middleware added before setting its
+   own, so `/api/v1/widget/*` responses are authoritatively controlled by
+   one policy only.
+
+Regression coverage: `tests/test_widget_cors.py` (reflects arbitrary
+origins without credentials on both simple and preflight widget requests;
+confirms the dashboard's own credentialed CORS for its own allowed origin is
+unaffected and does not reflect an arbitrary origin).
+
+### A fourth bug found the same way: dropped `Retry-After` header
+
+`app/core/errors.py`'s central `StarletteHTTPException` handler (written in
+Phase 1, see its Phase 3 bug above) rebuilds the entire JSON error response
+from scratch — and, until Phase 5, never forwarded `exc.headers`. This
+affects any route that raises `HTTPException(..., headers={...})`, not just
+Phase 5 code; it was invisible until the public widget's rate limiter (the
+first place in this codebase to set `Retry-After` on a `429`) made it
+observable in a live browser/curl check — a real `429` response was simply
+missing the header a client would need for a well-behaved retry.
+Fixed by passing `headers=exc.headers` into the handler's `JSONResponse`.
+Regression coverage: `tests/test_widget_public_api.py::test_rate_limit_exceeded_returns_429_with_retry_after`.
+
+### Privacy and retention
+
+Every widget installation carries a configurable `ai_disclosure` and
+`privacy_notice`, rendered in the panel before any message is sent, plus a
+persistent "Demo AI" badge reflecting `mock_mode: true` in the config
+response — this field is never removed or defaulted to `false` in Phase 5,
+since the mock provider is the only one this phase's zero-cost scope
+supports end-to-end. Data-minimization in effect: no raw audio is ever
+stored (see Browser voice above); marketing consent is never inferred (see
+Contact capture above); a visitor session expires and can be revoked
+independently of the conversation it's attached to.
+
+#### Retention defaults
+
+`app/config.py` declares one retention default per record type. Read this
+section precisely — these are **configuration values, not enforcement**:
+
+| Record type | Default | Setting |
+|---|---|---|
+| `WidgetVisitorSession` | 30 days | `WIDGET_VISITOR_SESSION_RETENTION_DAYS` |
+| `Conversation` (+ its messages/summary) | 90 days | `WIDGET_CONVERSATION_RETENTION_DAYS` |
+| `Contact` / `Enquiry` | 365 days | `CONTACT_AND_ENQUIRY_RETENTION_DAYS` |
+| `AppointmentRequest` | 180 days | `APPOINTMENT_REQUEST_RETENTION_DAYS` |
+| `HumanHandoff` | 180 days | `HANDOFF_REQUEST_RETENTION_DAYS` |
+
+**No automated deletion job exists in Phase 5.** No scheduled task, cron
+entry, or code path anywhere in this codebase reads these settings to
+actually delete anything — they are declared now, in one reviewed,
+per-tenant-independent place, precisely so a future deletion job has an
+already-agreed-on default to start from instead of each such job inventing
+its own number. **Every record type above currently requires manual
+deletion** — directly against the database, by an operator, exactly like
+the E2E test cleanup this phase's own verification uses (see
+docs/PROGRESS.md), scoped by tenant and verified against the database name
+first. `WidgetInstallation.revoked_at` and `WidgetVisitorSession.revoked_at`
+stop *new* activity immediately (see the threat model above) but do not
+delete any row — revocation and retention are deliberately separate
+concerns.
+
+**The future deletion-job boundary**, so a later phase's design starts from
+an explicit contract rather than guessing: a scheduled job would read each
+`*_retention_days` setting, delete (or tenant-configurably archive) rows
+older than that window, respect FK cascade behavior already defined in
+docs/database-schema.md (e.g. deleting a `Conversation` past its retention
+window would cascade to its `WidgetVisitorSession` and `Enquiry` rows via
+existing `ON DELETE CASCADE`, but `Contact` would only have its
+`conversation_id` set `NULL`, matching its "survives the conversation that
+first captured it" design), and would need its own audit trail distinct
+from the tenant-facing records it deletes. None of that exists yet; this
+paragraph is a design boundary, not a description of running code.
+
+**No compliance certification** (GDPR/HIPAA/CCPA/etc.) is claimed anywhere
+in the product or this documentation, before or after adding these
+defaults — declaring a retention *number* is not a compliance program, and
+nothing here should be read as one. The clinic template's mandatory safety
+rules (see above) are a liability-reduction measure, not a compliance
+claim.

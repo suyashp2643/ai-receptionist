@@ -19,9 +19,18 @@ def register_exception_handlers(app: FastAPI) -> None:
         # here is the same defensive fix as the validation handler below,
         # applied proactively rather than waiting to discover another case
         # the hard way.
+        #
+        # `headers=exc.headers` matters: this handler replaces FastAPI's
+        # default HTTPException response entirely, and without forwarding
+        # `exc.headers` explicitly, any header a route attaches via
+        # `HTTPException(..., headers={...})` (e.g. the public widget rate
+        # limiter's `Retry-After` on a 429) is silently dropped — caught live
+        # via a real 429 response missing `Retry-After` during Phase 5 E2E
+        # verification, not from reading the code.
         return JSONResponse(
             status_code=exc.status_code,
             content={"error": {"message": jsonable_encoder(exc.detail), "status_code": exc.status_code}},
+            headers=exc.headers,
         )
 
     @app.exception_handler(RequestValidationError)

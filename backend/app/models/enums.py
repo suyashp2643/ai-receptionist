@@ -60,14 +60,18 @@ UNSUPPORTED_KNOWLEDGE_SOURCE_TYPES = frozenset({KnowledgeSourceType.WEBSITE, Kno
 
 class ConversationMode(str, enum.Enum):
     TEST = "test"
-    # Reserved for Phase 5+ (public/live widget conversations). The service
-    # layer never creates anything but TEST in Phase 4 — there is no request
-    # field that lets a client choose this value.
+    # Public embeddable-widget conversations (Phase 5) — never chosen by
+    # client input; the public widget route always passes this explicitly,
+    # the dashboard test-console route always passes TEST.
+    WIDGET = "widget"
+    # Reserved for a later phase (e.g. true telephone/voice channels) —
+    # nothing creates this value yet.
     FUTURE_LIVE = "future_live"
 
 
 class ConversationChannel(str, enum.Enum):
     DASHBOARD_TEST = "dashboard_test"
+    WIDGET = "widget"
 
 
 class ConversationStatus(str, enum.Enum):
@@ -82,3 +86,39 @@ class ConversationMessageRole(str, enum.Enum):
     ASSISTANT = "assistant"
     SYSTEM = "system"
     TOOL = "tool"
+
+
+# --- Phase 5: public widget ---
+
+
+class WidgetInstallationStatus(str, enum.Enum):
+    DRAFT = "draft"
+    ACTIVE = "active"
+    PAUSED = "paused"
+    REVOKED = "revoked"
+
+
+class AppointmentRequestStatus(str, enum.Enum):
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    DECLINED = "declined"
+    CANCELLED = "cancelled"
+
+
+class HandoffStatus(str, enum.Enum):
+    OPEN = "open"
+    CLAIMED = "claimed"
+    RESOLVED = "resolved"
+    CANCELLED = "cancelled"
+
+
+class EnquiryStatus(str, enum.Enum):
+    NEW = "new"
+    QUALIFIED = "qualified"
+    CLOSED = "closed"
+
+
+class PreferredContactMethod(str, enum.Enum):
+    EMAIL = "email"
+    PHONE = "phone"
+    EITHER = "either"

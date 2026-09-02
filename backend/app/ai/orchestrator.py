@@ -189,7 +189,13 @@ class ConversationOrchestrator:
     # Step 1: validate tenant, receptionist and workflow / start conversation
     # ------------------------------------------------------------------
     def start_conversation(
-        self, *, receptionist_id: uuid.UUID, visitor_reference: str | None = None, locale: str = "en"
+        self,
+        *,
+        receptionist_id: uuid.UUID,
+        visitor_reference: str | None = None,
+        locale: str = "en",
+        mode: ConversationMode = ConversationMode.TEST,
+        channel: ConversationChannel = ConversationChannel.DASHBOARD_TEST,
     ) -> Conversation:
         receptionist = self.receptionist_repo.get(receptionist_id)
         if receptionist is None:
@@ -208,8 +214,8 @@ class ConversationOrchestrator:
         conversation = Conversation(
             tenant_id=self.tenant_id,
             receptionist_id=receptionist_id,
-            mode=ConversationMode.TEST,
-            channel=ConversationChannel.DASHBOARD_TEST,
+            mode=mode,
+            channel=channel,
             provider=self.provider.name,
             status=ConversationStatus.ACTIVE,
             visitor_reference=visitor_reference,

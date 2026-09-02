@@ -487,3 +487,222 @@ are each independent, unit-tested modules the orchestrator calls in
 sequence — not inlined into one large function. See docs/api.md for the SSE
 event contract and docs/security.md for the safety engine, prompt-injection
 resistance, and system-instruction boundary in detail.
+
+## Public embeddable widget (implemented — Phase 5)
+
+### Extending, not duplicating, the Phase 4 engine
+
+The public widget conversation routes (`app/api/v1/widget_public.py`) reuse
+`ConversationOrchestrator` — no separate "widget orchestrator" class exists,
+and `submit_message`, its transaction phasing, its row-locking, and its SSE
+event shapes are untouched. **`orchestrator.py` was not left byte-for-byte
+unchanged, however**: `start_conversation` gained two optional keyword
+parameters,
+`mode: ConversationMode = ConversationMode.TEST` and
+`channel: ConversationChannel = ConversationChannel.DASHBOARD_TEST`,
+matching the Phase 4 defaults exactly. This is a backward-compatible
+signature extension, not a rewrite — the dashboard test-console's call site
+(`app/api/v1/conversations.py`) does not pass either argument and is
+therefore unaffected, which is asserted, not just claimed: the full Phase 4
+`test_conversations_api.py` suite and the `multiconn` PostgreSQL
+integration suite both still pass after this change (see
+docs/PROGRESS.md's Phase 5 verification results). The widget route is the
+only caller that passes `mode=ConversationMode.WIDGET,
+channel=ConversationChannel.WIDGET` explicitly. The `stream_sync_generator`
+SSE adapter (`app/api/v1/conversations.py`) genuinely is unchanged — the
+widget's message-send route imports and calls it directly, following the
+identical `session_scope_factory`-owned-session pattern documented above
+for the dashboard route, not a re-implementation of it.
+
+### A parallel, deliberately separate authorization model
+
+The dashboard's `TenantContext` (resolved from a Bearer JWT + tenant
+membership) has no equivalent identity to resolve for a public widget
+caller — there is no user, no login. `app/api/widget_deps.py` builds an
+analogous but distinct `WidgetVisitorContext`, resolved instead from
+`public_id` (path) + a capability token (header), never from a JWT. Two
+resolution shapes exist because two different route shapes need them: one
+where `conversation_id` is in the URL (`get_widget_visitor_context`, cross-
+checks the token matches) and one where it isn't
+(`get_widget_visitor_context_from_token`, for `/contacts`,
+`/appointment-requests`, `/handoff-requests` — the token alone determines
+the conversation, since a session is always 1:1 with one). Full security
+model: docs/security.md.
+
+### New repository query functions, not new repository methods, for the two "resolve before I know the tenant" lookups
+
+`get_installation_by_public_id` (`app/repositories/widget_installation.py`)
+and `get_session_by_token_hash` (`app/repositories/widget_visitor_session.py`)
+are plain module-level functions, not `TenantScopedRepository` methods — a
+deliberate choice made after noticing that constructing a
+`TenantScopedRepository` with a fabricated placeholder `tenant_id` just to
+reach `self.db` would leave a half-valid repository object sitting around
+that *looks* safe to reuse for a tenant-scoped call but silently isn't
+(every subsequent `.get()`/`.list()` on it would filter by the fake ID and
+silently return nothing, rather than erroring). A plain function makes the
+"this lookup is not yet tenant-scoped, by necessity" fact visible at the
+call site instead of hidden behind a class that implies scoping everywhere
+else in the codebase.
+
+### Rate limiting as a Protocol, not a concrete dependency
+
+`app/core/rate_limit.RateLimiter` is a `Protocol` with one shipped
+implementation (`InMemoryRateLimiter`, single-process, documented in
+docs/security.md); `app/api/widget_deps.rate_limit(action, limit=...,
+window_seconds=...)` is a dependency *factory* returning a per-route
+dependency, so each public route declares its own limit inline
+(`Depends(rate_limit("message", limit=30, window_seconds=60))`) rather than
+one shared global limit. A future Redis-backed implementation only needs to
+satisfy the same three-method `Protocol` — no call site changes.
+
+### A separate CORS policy, not a relaxed one
+
+`app/core/widget_cors.WidgetPublicCorsMiddleware` exists because the
+dashboard's fixed-origin, credentialed `CORSMiddleware` (`app/main.py`) is
+structurally wrong for a surface meant to run on arbitrary third-party
+domains unknown until runtime — not because the widget needed *weaker*
+CORS, but because it needed a *different shape* of CORS (reflected origin,
+zero credentials, since the widget never uses cookies). Middleware
+ordering matters here and was confirmed empirically, not assumed
+(`app.add_middleware()`'s most-recently-added middleware ends up
+outermost) — full incident writeup, including a credential-leakage bug this
+surfaced, in docs/security.md.
+
+### Widget bundle (`widget/`)
+
+A separate, dependency-free TypeScript package, bundled with esbuild into
+one minified IIFE (`widget/dist/widget.js`, ~25KB) — no React, no framework,
+no runtime dependency at all beyond the browser itself. Structure:
+
+- `src/index.ts` — the self-initializing entry point. Reads
+  `document.currentScript`'s `data-receptionist-id`/`data-api-base-url`
+  attributes **synchronously**, before any `await` — the one point in an
+  `async`-loaded script's lifetime `document.currentScript` is guaranteed to
+  still resolve to its own tag. A module-level `Map` keyed by `public_id`
+  (`window.__aiReceptionistWidget`) prevents double-initialization if the
+  snippet is somehow present twice on one page.
+- `src/ui.ts` — the `Widget` class: owns one Shadow DOM root (`mode: "open"`,
+  attached to a single host `<div>`), all panel/launcher/transcript/form
+  rendering, and the conversation/voice/form state machine. Nothing outside
+  its own shadow root or host element is ever touched.
+- `src/api.ts` — a thin fetch-based client for the 8 public routes plus the
+  same hand-rolled SSE line parser pattern as the dashboard's
+  `conversations-api.ts` (native `EventSource` can't carry the
+  `X-Widget-Session-Token` header, so both clients read the POST response
+  body as a stream directly).
+- `src/voice.ts` — `VoiceRecognizer`/`VoiceSpeaker` wrapping
+  `SpeechRecognition`/`speechSynthesis` with feature detection; see
+  docs/security.md for what this does and does not claim about where
+  speech processing happens.
+- `src/storage.ts` — `sessionStorage`-backed capability-token persistence,
+  scoped per `public_id`, degrading to a no-op (fresh session every time)
+  if storage is unavailable rather than throwing.
+- `src/styles.ts` — the complete CSS injected into the shadow root as a
+  `<style>` tag; nothing styles the widget from outside its shadow
+  boundary, and the widget's own styles cannot leak onto the host page.
+
+**A real CSS bug found via live browser testing, not the unit suite:**
+`.error-banner { display: flex; ... }` and the element's own `hidden`
+attribute have equal CSS specificity (`.error-banner` vs. the UA
+stylesheet's `[hidden]` rule), and source order let the class win — a
+"hidden" error banner rendered visibly (as an empty colored bar) in a real
+browser despite `element.hidden === true`. jsdom-based component tests
+never caught this because they assert on the `hidden` *property*, not on
+computed `display`. Fixed by adding an explicit
+`.error-banner[hidden] { display: none; }` rule (higher specificity than
+either alone), matching the pattern `.panel[hidden]` already used. A second,
+related bug the same live session found: a form's own validation error
+(`showError`, writing to the *main* conversation error banner) was
+invisible while a structured action form was open, because
+`.form-overlay { position: absolute; inset: 0; }` visually covers that
+banner completely — fixed by giving each form overlay its own local
+`.form-error` element instead of sharing the main banner, with a
+regression test (`ui.test.ts`) asserting the error appears inside the
+overlay and the main banner stays hidden.
+
+Full widget, security, and live end-to-end verification results:
+docs/PROGRESS.md.
+
+### Structured service/location pickers (Phase 5 follow-up)
+
+The public config response (`GET .../config`) gained `services`/`locations`
+arrays — active-only, public-safe (`id`/`name`/`description` for services,
+`id`/`name`/`timezone` for locations) — and the widget's appointment form
+renders a `<select>` for each only when its array is non-empty, always with
+a "Not sure" (empty-value) first option. Submission re-validates both IDs
+server-side exactly like every other client-supplied identifier in this
+codebase: same-tenant (`ServiceRepository`/`BusinessLocationRepository`,
+tenant-scoped by construction), active-only (`get_active`, added
+alongside `get`), and — the one relationship a flat FK can't express —
+that a service restricted to one location (`Service.location_id` set)
+isn't requested with a *different* location. When a location is selected,
+its own IANA timezone governs the appointment date's "today" boundary
+server-side (`app/services/appointment_request_service.py`), not the
+visitor's browser clock or an unvalidated free-text timezone string — the
+widget also sends that location's timezone as the request's `timezone`
+field, so the date picker and the server's validation reasoning stay about
+the same "today." Regression coverage: `tests/test_appointment_request_service.py`
+(17 tests, including a clock-frozen proof that the location's timezone
+overrides a deliberately different submitted one) and
+`tests/test_widget_public_api.py`.
+
+### Live local dashboard preview (Phase 5 follow-up)
+
+`/dashboard/receptionist/widget`'s preview is the **real** embeddable
+widget bundle against the **real** public API — not a mock, and not a
+second "preview mode" branch inside the widget's own code:
+
+- The dashboard renders `<iframe src="/widget-preview.html?publicId=...&apiBaseUrl=...&bundleUrl=...&sessionNamespace=...">`,
+  sandboxed with `allow-scripts allow-same-origin allow-forms` (no
+  `allow-top-navigation`, `allow-popups`, etc.).
+  `widget-preview.html` (`frontend/public/`) is a small, static,
+  dependency-free page — no dashboard code, no import of `lib/api.ts`, no
+  reference to the access token or either auth cookie anywhere in it — that
+  reads those query parameters and injects the *exact same*
+  `<script data-receptionist-id=... async>` snippet a real customer page
+  would use, sourced from the installation's real `widget_bundle_url`.
+- **Origin trust, not domain-list pollution**: the preview page is served
+  from the dashboard's own origin, which the backend trusts via a
+  dedicated, separate setting (`Settings.platform_preview_origins`, see
+  `app/api/widget_deps.validate_widget_origin`) — never by adding that
+  origin to the tenant's own `WidgetInstallation.allowed_domains`, which
+  would incorrectly make the dashboard itself a permanently-"allowed" real
+  embedding domain for that tenant.
+- **No dashboard credential reaches the widget** — not by a special
+  precaution added for preview, but because the widget bundle already
+  never does the things that would leak one: it never reads
+  `document.cookie`, never reaches into `window.parent`, and every one of
+  its `fetch()` calls omits `credentials: "include"` (default
+  `"same-origin"`), so even the dashboard's own HttpOnly refresh cookie —
+  scoped to a *different* origin (the backend) regardless — is never sent.
+  The preview iframe's sandboxing is defense-in-depth on top of that, not
+  the only thing preventing it.
+- **The same capability-token flow, unmodified**: `POST .../sessions` still
+  issues an opaque token the preview's widget instance stores in its own
+  `sessionStorage` exactly like a real visitor's browser would — there is
+  no bypass, shortcut, or elevated-trust code path for preview traffic at
+  the API layer.
+- **Preview traffic is tagged, not silently indistinguishable from real
+  visitors**: the injected snippet carries `data-visitor-reference="dashboard-preview"`,
+  threaded through to `Conversation.visitor_reference` on every session the
+  preview starts (an additive use of a field that already existed) — a
+  tenant reviewing their records can tell preview conversations apart from
+  real ones.
+- **"Restart preview"** doesn't reload the widget bundle or touch the
+  backend at all — reloading the iframe alone would *not* be enough, since
+  `sessionStorage` persists across same-origin frame reloads for the life
+  of the tab, so the old conversation would simply resume. Instead, the
+  dashboard generates a fresh random `sessionNamespace` and remounts the
+  iframe with it (React `key`); the widget threads that namespace into its
+  `sessionStorage` key (`widget/src/storage.ts`), so a new namespace is, by
+  itself, enough to make the lookup miss and start a genuinely new session
+  — no explicit clearing, no reaching into the iframe from outside it.
+- The live preview only renders for an **active** installation (the same
+  `409` a real embed would get from `draft`/`paused` otherwise) — a draft
+  or paused installation shows a plain "activate to preview" message
+  instead of a non-functional iframe.
+
+Regression coverage: `frontend/src/app/dashboard/receptionist/widget/page.test.tsx`
+("live local preview" describe block — activation-gating, real bundle/config
+URL construction, sandbox attributes, and restart-changes-the-src) and
+`tests/test_widget_public_api.py::TestWidgetConfig::test_platform_preview_origin_is_always_allowed`.

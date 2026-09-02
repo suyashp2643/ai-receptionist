@@ -5,6 +5,7 @@ from app.api.v1 import health
 from app.api.v1.router import api_router
 from app.config import get_settings
 from app.core.errors import register_exception_handlers
+from app.core.widget_cors import WidgetPublicCorsMiddleware
 from app.logging_config import configure_logging
 
 
@@ -22,6 +23,16 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Added AFTER CORSMiddleware — Starlette makes the most-recently-added
+    # middleware outermost (confirmed empirically: with the reverse order, a
+    # widget request's OPTIONS preflight was intercepted and rejected by
+    # CORSMiddleware's fixed dashboard-origin allow-list before ever
+    # reaching this one). Being outermost means /api/v1/widget/* requests
+    # are handled entirely by this middleware (any origin, no credentials;
+    # see its docstring for why that's safe) and never reach
+    # CORSMiddleware's dashboard-only allow-list at all.
+    app.add_middleware(WidgetPublicCorsMiddleware)
 
     register_exception_handlers(app)
 

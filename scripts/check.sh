@@ -2,8 +2,8 @@
 # Runs every verification command used across every phase so far: backend
 # tests/lint/type-check (including the Phase 4 PostgreSQL multi-connection
 # integration suite whenever DATABASE_URL is configured — see
-# tests/integration/), frontend lint/type-check/build, widget
-# lint/type-check/build.
+# tests/integration/), frontend lint/type-check/vitest/build, widget
+# lint/type-check/vitest/build/bundle (Phase 5).
 # Safe to re-run any time; makes no destructive changes to shared data (the
 # multi-connection suite creates and deletes only its own uniquely
 # identifiable test tenants — see tests/integration/conftest.py).
@@ -29,6 +29,9 @@ echo "== Frontend: eslint =="
 echo "== Frontend: tsc =="
 (cd "$REPO_ROOT/frontend" && npx tsc --noEmit)
 
+echo "== Frontend: vitest =="
+(cd "$REPO_ROOT/frontend" && npx vitest run)
+
 echo "== Frontend: build =="
 (cd "$REPO_ROOT/frontend" && npm run build)
 
@@ -38,7 +41,13 @@ echo "== Widget: eslint =="
 echo "== Widget: tsc =="
 (cd "$REPO_ROOT/widget" && npx tsc --noEmit)
 
-echo "== Widget: build =="
+echo "== Widget: vitest =="
+(cd "$REPO_ROOT/widget" && npx vitest run)
+
+echo "== Widget: build (type declarations) =="
 (cd "$REPO_ROOT/widget" && npm run build)
+
+echo "== Widget: bundle (production IIFE) =="
+(cd "$REPO_ROOT/widget" && npm run bundle)
 
 echo "All checks passed."
