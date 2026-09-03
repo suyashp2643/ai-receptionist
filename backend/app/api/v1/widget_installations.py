@@ -25,13 +25,7 @@ class WidgetEmbedSnippetRead(WidgetInstallationRead):
 
 
 def _build_snippet(*, bundle_url: str, public_id: str) -> str:
-    return (
-        f'<script\n'
-        f'  src="{bundle_url}"\n'
-        f'  data-receptionist-id="{public_id}"\n'
-        f"  async\n"
-        f"></script>"
-    )
+    return f"<script\n" f'  src="{bundle_url}"\n' f'  data-receptionist-id="{public_id}"\n' f"  async\n" f"></script>"
 
 
 def _get_installation_or_404(installation_id: uuid.UUID, ctx: TenantContext, db: Session) -> WidgetInstallation:
@@ -143,9 +137,7 @@ def activate_widget_installation(
     return WidgetInstallationRead.model_validate(installation)
 
 
-@router.post(
-    "/tenants/{tenant_id}/widget-installations/{installation_id}/pause", response_model=WidgetInstallationRead
-)
+@router.post("/tenants/{tenant_id}/widget-installations/{installation_id}/pause", response_model=WidgetInstallationRead)
 def pause_widget_installation(
     installation_id: uuid.UUID,
     ctx: TenantContext = Depends(require_tenant_role(TenantMemberRole.ADMIN)),

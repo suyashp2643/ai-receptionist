@@ -18,6 +18,8 @@ those rows (and only those rows, cascading through the standard
 after re-verifying the database name.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 from app.db.session import get_engine
 from app.main import create_app
@@ -58,6 +60,17 @@ def real_client(multiconn_engine):
     app = create_app()
     with TestClient(app) as client:
         yield client
+
+
+@pytest.fixture()
+def executor():
+    """Shared across every multiconn test module — see
+    test_conversation_concurrency.py's original docstring for why
+    `cancel_futures` matters: a genuine deadlock/race regression should
+    fail this fixture's teardown fast, never hang the whole suite."""
+    pool = ThreadPoolExecutor(max_workers=8)
+    yield pool
+    pool.shutdown(wait=False, cancel_futures=True)
 
 
 class CreatedTestData:

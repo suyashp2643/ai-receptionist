@@ -113,8 +113,23 @@ class HandoffStatus(str, enum.Enum):
 
 
 class EnquiryStatus(str, enum.Enum):
+    """`CLOSED` predates Phase 6's richer pipeline (added in Phase 5) and is
+    kept, unmigrated, as a legacy terminal status equivalent to `ARCHIVED`
+    for any row written before this phase — Postgres native enums cannot
+    drop a value without rebuilding the type and rewriting every row, and
+    there is nothing wrong with the data itself, so it is left in place
+    rather than force-migrated. New status-transition validation (see
+    app/services/enquiry_service.py) never assigns `CLOSED` to a row going
+    forward; use `ARCHIVED` instead. See docs/database-schema.md."""
+
     NEW = "new"
     QUALIFIED = "qualified"
+    CONTACTED = "contacted"
+    APPOINTMENT_REQUESTED = "appointment_requested"
+    IN_PROGRESS = "in_progress"
+    WON = "won"
+    LOST = "lost"
+    ARCHIVED = "archived"
     CLOSED = "closed"
 
 

@@ -68,9 +68,7 @@ class InMemoryRateLimiter:
             retry_after = max(0, int(window_seconds - elapsed))
 
             if bucket.count >= limit:
-                return RateLimitResult(
-                    allowed=False, limit=limit, remaining=0, retry_after_seconds=retry_after
-                )
+                return RateLimitResult(allowed=False, limit=limit, remaining=0, retry_after_seconds=retry_after)
 
             bucket.count += 1
             return RateLimitResult(

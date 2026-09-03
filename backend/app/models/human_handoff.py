@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, String
+from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, Integer, String
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -61,7 +61,23 @@ class HumanHandoff(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # Nullable, SET NULL: "assigned" is a lightweight annotation of who is
+    # handling this, not the authorization boundary (claiming is — see
+    # app/services/human_handoff_service.py). A plain FK to users.id, not a
+    # composite tenant FK, since a user is not itself tenant-scoped; the
+    # service layer verifies the assignee is an active member of this
+    # tenant before allowing the assignment.
+    assigned_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+
     idempotency_key: Mapped[str | None] = mapped_column(String(128))
+
+    # Optimistic concurrency AND the mechanism behind atomic claiming: claim
+    # is implemented as a single conditional UPDATE ... WHERE status='open'
+    # (never a read-then-write), so two simultaneous claims can never both
+    # succeed — see app/services/human_handoff_service.py.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
     def __repr__(self) -> str:
         return f"HumanHandoff(id={self.id!r}, tenant_id={self.tenant_id!r}, status={self.status!r})"

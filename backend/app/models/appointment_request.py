@@ -1,7 +1,7 @@
 import uuid
 from datetime import date, time
 
-from sqlalchemy import Date, ForeignKey, ForeignKeyConstraint, String, Time
+from sqlalchemy import Date, ForeignKey, ForeignKeyConstraint, Integer, String, Time
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -65,6 +65,11 @@ class AppointmentRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     idempotency_key: Mapped[str | None] = mapped_column(String(128))
+
+    # Optimistic concurrency for Phase 6's confirm/decline/cancel actions —
+    # see Enquiry.version's docstring for the same rationale. Status changes
+    # are separately recorded as ActivityEvents (actor + timestamp).
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
     def __repr__(self) -> str:
         return f"AppointmentRequest(id={self.id!r}, tenant_id={self.tenant_id!r}, status={self.status!r})"

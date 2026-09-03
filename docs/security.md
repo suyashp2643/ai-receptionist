@@ -201,9 +201,37 @@ route declares only the *minimum* rank it needs:
 | Every Phase 3 resource GET (receptionists, workflow, locations, services, FAQs, knowledge, onboarding state) | any active member |
 | Every Phase 3 resource POST/PATCH/DELETE | `admin` |
 | `GET /industry-templates*` | any authenticated user (global catalog, not tenant-scoped) |
+| Phase 6: conversations/contacts/enquiries/appointments/handoffs — every `GET`, plus `PATCH .../enquiries/{id}/status`, `POST .../handoffs/{id}/claim`, `PATCH .../handoffs/{id}/status` when the target is `resolved` | any active member |
+| Phase 6: `PATCH .../appointments/{id}/status` (confirm/decline/cancel) | `admin` |
+| Phase 6: `PATCH .../handoffs/{id}/status` when the target is `cancelled` | `admin` (checked explicitly in the route — the one asymmetric case in this surface, since claim/resolve are ordinary day-to-day work but cancelling is an override decision) |
+| Phase 6: `GET/POST/PATCH/DELETE .../notes` | any active member may create or list; editing is author-only; deleting is author **or** `admin`/`owner` |
+| Phase 6: `GET .../activity`, `GET .../analytics/*` | any active member |
+| Phase 6: `GET .../exports/{entity}` | `admin` |
 
 A member with insufficient role gets `403`; a non-member gets `404` (see
 above) — the two failure modes are intentionally distinct.
+
+### Phase 6 permission matrix (by role, by capability)
+
+| Capability | Member | Admin | Owner |
+|---|---|---|---|
+| View conversations, contacts, enquiries, appointments, handoffs (including PII: contact name/email/phone) | ✅ | ✅ | ✅ |
+| Update an enquiry's status | ✅ | ✅ | ✅ |
+| Claim / resolve a handoff | ✅ | ✅ | ✅ |
+| Add a note; edit/delete their **own** note | ✅ | ✅ | ✅ |
+| Delete **another member's** note | ❌ | ✅ | ✅ |
+| Confirm / decline / cancel an appointment | ❌ | ✅ | ✅ |
+| Cancel a handoff | ❌ | ✅ | ✅ |
+| Export data (CSV) | ❌ | ✅ | ✅ |
+| View the activity/audit feed | ✅ | ✅ | ✅ |
+| Change tenant/receptionist security configuration (allowed domains, workflow safety rules, etc.) | ❌ | ✅ | ✅ |
+
+Members can see full contact PII (name, email, phone) by design — a
+receptionist covering handoffs and appointments cannot do that job without
+seeing who they are contacting. This is a deliberate policy decision, not
+an oversight: exporting *bulk* data is the line drawn between "operate the
+business day-to-day" (member) and "extract data or change how the business
+is configured" (admin/owner).
 
 ## Mandatory safety rules (clinic, law firm)
 
@@ -753,6 +781,12 @@ section precisely — these are **configuration values, not enforcement**:
 | `AppointmentRequest` | 180 days | `APPOINTMENT_REQUEST_RETENTION_DAYS` |
 | `HumanHandoff` | 180 days | `HANDOFF_REQUEST_RETENTION_DAYS` |
 
+Phase 6's two new tables, `InternalNote` and `ActivityEvent`, have **no
+declared retention default yet** — they are staff-authored operational
+records (not visitor data), and this phase did not add a setting for them.
+A future phase should decide these deliberately rather than inherit one of
+the table above by assumption.
+
 **No automated deletion job exists in Phase 5.** No scheduled task, cron
 entry, or code path anywhere in this codebase reads these settings to
 actually delete anything — they are declared now, in one reviewed,
@@ -785,3 +819,78 @@ defaults — declaring a retention *number* is not a compliance program, and
 nothing here should be read as one. The clinic template's mandatory safety
 rules (see above) are a liability-reduction measure, not a compliance
 claim.
+
+## Status-transition rules (Phase 6)
+
+Every status change is validated against an explicit transition graph
+before being applied — there is no "any status to any status" PATCH
+anywhere in this surface.
+
+**Enquiry** (`app/services/enquiry_service.py::ENQUIRY_STATUS_TRANSITIONS`):
+`new → {qualified, contacted, lost, archived}`;
+`qualified`/`contacted → {contacted/qualified, appointment_requested,
+in_progress, won, lost, archived}`; `appointment_requested → {in_progress,
+won, lost, archived}`; `in_progress → {won, lost, archived}`; `won`/`lost →
+{archived}`; `archived` is terminal. The legacy `closed` value (Phase 5)
+has the same edges as `archived`. `WON`/`LOST` are manual operational
+labels a tenant applies — nothing computes or infers a dollar amount from
+either.
+
+**Appointment request**
+(`app/services/appointment_request_service.py::APPOINTMENT_STATUS_TRANSITIONS`):
+`pending → {confirmed, declined, cancelled}`; `confirmed → {cancelled}`;
+`declined`/`cancelled` are terminal. Owner/admin only (see the permission
+matrix above). Changing status **never** sends any message to the visitor
+— Phase 6 has no delivery mechanism at all, and the dashboard UI states
+this explicitly next to every action.
+
+**Human handoff**
+(`app/services/human_handoff_service.py::HANDOFF_STATUS_TRANSITIONS`):
+`open → {cancelled}` via the version-checked path, or `open → claimed` via
+the **separate**, atomic `claim()` path (see docs/architecture.md — routing
+`claimed` through the ordinary version-checked update would reintroduce
+the race `claim()` exists to prevent, so `update_status()` refuses `claimed`
+as a target outright); `claimed → {resolved, cancelled}`; `resolved`/
+`cancelled` are terminal. Resolving is member-level; cancelling is
+admin/owner-level (the one asymmetric rule in this permission surface).
+
+Every successful transition (including a won claim) is recorded as an
+`ActivityEvent` with the old/new status pair — that log is the actual
+status *history*; the `version` column only prevents a silent overwrite,
+it does not reconstruct what changed when.
+
+## Export security (Phase 6)
+
+CSV export (`GET .../exports/{entity}`) is owner/admin-only, tenant-scoped
+(every row comes from a tenant-scoped repository query, never a raw
+cross-tenant query), date-range-bounded (a required `date_from`/`date_to`
+pair, capped at 366 days), and row-count-bounded
+(`app/core/csv_export.MAX_EXPORT_ROWS`, currently 10,000 — a query that
+would exceed it raises a controlled `422` rather than materializing an
+unbounded result set). The CSV is generated entirely **in memory**
+(`app/core/csv_export.py::build_csv`) and streamed straight into the HTTP
+response — nothing is ever written to a file on the server.
+
+**CSV/formula-injection protection**: any cell whose value starts with
+`=`, `+`, `-`, or `@` is prefixed with a literal `'` before being written.
+Excel/Sheets/LibreOffice treat a leading `'` as "force text" and strip it
+from what's displayed, so the export stays readable while the value can
+never be interpreted as a formula by the spreadsheet application that
+opens it. This also means an ordinary phone number stored with a leading
+`+` (e.g. `+15551234567`) is escaped the same way — a deliberate, correct
+side effect: a real phone number in that shape would otherwise be
+interpreted as a formula too, so escaping it is the safe behavior, not an
+edge case to special-case around. Verified against a real leading-`+`
+phone number and a deliberately formula-shaped contact name in this
+phase's live browser verification (see docs/PROGRESS.md).
+
+The conversations export is **metadata only** — id, timestamps, source,
+status, receptionist, qualification/safety flags — never message content,
+citations, or tool payloads; every column exported for every entity is
+already visible elsewhere in the dashboard to the same owner/admin
+audience, so export introduces no new disclosure. Every export call is
+recorded as an `ActivityEvent` (`action_type: "export.downloaded"`,
+metadata: which entity, date range, and (when supplied) the `status`/
+`source` filter applied — never the exported rows themselves). No secrets, capability tokens, token hashes, or system-prompt
+text are ever exportable, since none of those fields exist on any exported
+model in the first place.

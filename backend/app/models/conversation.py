@@ -70,6 +70,18 @@ class Conversation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     visitor_reference: Mapped[str | None] = mapped_column(String(200))
     locale: Mapped[str] = mapped_column(String(8), nullable=False, default="en")
 
+    # Set once, never cleared, by the orchestrator (app/ai/orchestrator.py)
+    # the first time a safety directive fires in this conversation — lets
+    # Phase 6's dashboard/analytics query for safety events and clinic
+    # emergencies without loading every message's `safety_labels` JSONB.
+    # `had_clinic_emergency` is a stricter subset of `had_safety_event`
+    # (only the "clinic_urgent" category) so a clinic emergency conversation
+    # can be surfaced separately from an ordinary safety intervention, per
+    # docs/security.md's requirement that emergencies never look like an
+    # everyday handoff.
+    had_safety_event: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    had_clinic_emergency: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
     collected_data: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     missing_required_fields: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     qualification_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, func
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -38,6 +38,16 @@ class WidgetVisitorSession(UUIDPrimaryKeyMixin, Base):
     )
 
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+
+    # Set server-side, once, at session creation — from whether the
+    # request's Origin matched Settings.platform_preview_origins_list
+    # (app/api/widget_deps.py's validate_widget_origin), never from any
+    # client-supplied field. This is Phase 6's authoritative signal for
+    # excluding the dashboard's own live-preview traffic from production
+    # analytics — unlike `Conversation.visitor_reference` (client-supplied,
+    # only a display label), this cannot be spoofed by a real customer's
+    # widget embed to masquerade as, or hide from, preview traffic.
+    is_platform_preview: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -495,6 +495,7 @@ class ConversationOrchestrator:
         # or row lock held for the duration of this loop.
         accumulated = ""
         provider_message_id: str | None = None
+        is_fallback_response = False
         stream_request = GenerateRequest(messages=provider_messages, tools=tool_definitions, context=context)
         try:
             for chunk in self.provider.stream(stream_request):
@@ -506,6 +507,8 @@ class ConversationOrchestrator:
                     yield {"event": "response.delta", "data": {"delta": chunk.delta}}
                 if chunk.provider_message_id:
                     provider_message_id = chunk.provider_message_id
+                if chunk.is_fallback:
+                    is_fallback_response = True
         except ProviderError as exc:
             yield _provider_error_event(exc)
             self._persist_failure(conversation, error_code=exc.code)
@@ -558,11 +561,16 @@ class ConversationOrchestrator:
             provider_message_id=provider_message_id,
             citations=citations,
             safety_labels=safety_labels,
+            is_fallback_response=is_fallback_response,
             latency_ms=latency_ms,
         )
         self.message_repo.add(assistant_message)
         conversation.last_message_at = _utcnow()
         conversation.last_error_code = None
+        if safety_directive.triggered:
+            conversation.had_safety_event = True
+            if safety_directive.category == "clinic_urgent":
+                conversation.had_clinic_emergency = True
         # `assistant_message.id` is a client-side `default=uuid.uuid4`
         # column — SQLAlchemy only evaluates that default (and assigns it
         # onto the instance) when the row is actually flushed, so reading

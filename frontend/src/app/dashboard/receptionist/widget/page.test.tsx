@@ -18,6 +18,10 @@ vi.mock("@/lib/auth-context", () => ({
   }),
 }));
 
+vi.mock("@/components/dashboard/DashboardContext", () => ({
+  useDashboardContext: () => ({ tenantId: "tenant-1", tenantName: "Acme", role: "owner", canManage: true }),
+}));
+
 vi.mock("@/lib/phase3-api", () => ({
   listReceptionists: vi.fn(async () => [
     {

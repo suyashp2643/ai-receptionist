@@ -1,5 +1,6 @@
 """Import every model module here so Base.metadata sees all tables for Alembic."""
 
+from app.models.activity_event import ActivityEvent
 from app.models.appointment_request import AppointmentRequest
 from app.models.business_location import BusinessLocation
 from app.models.business_profile import BusinessProfile
@@ -11,6 +12,7 @@ from app.models.enquiry import Enquiry
 from app.models.faq import FAQ
 from app.models.human_handoff import HumanHandoff
 from app.models.industry_template import IndustryTemplate
+from app.models.internal_note import InternalNote
 from app.models.knowledge import KnowledgeChunk, KnowledgeDocument, KnowledgeSource
 from app.models.receptionist import Receptionist
 from app.models.receptionist_workflow import ReceptionistWorkflow
@@ -46,4 +48,6 @@ __all__ = [
     "Enquiry",
     "AppointmentRequest",
     "HumanHandoff",
+    "InternalNote",
+    "ActivityEvent",
 ]

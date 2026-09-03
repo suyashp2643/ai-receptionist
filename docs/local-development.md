@@ -149,6 +149,27 @@ don't need to be set for local development.
    public embeddable widget. For the public, unauthenticated-beyond-a-
    capability-token equivalent (Phase 5), see "3. Widget" below.
 
+### Using the operations dashboard (Phase 6)
+
+1. Log in as any tenant member. `/dashboard` is now the analytics
+   overview — it shows real KPIs computed from your tenant's own data, with
+   date-range and receptionist filters, once onboarding is complete.
+2. The header navigation (Overview / Conversations / Contacts / Enquiries /
+   Appointments / Handoffs / Activity) reaches the rest of the dashboard;
+   the user menu (top right) links out to the existing Settings, Test
+   console, and Website widget pages.
+3. To see non-trivial data, first generate some via the widget (see "3.
+   Widget" below) or the test console — the dashboard has no seed-data
+   button of its own, and an empty tenant will correctly show empty states
+   everywhere rather than placeholder content.
+4. Every dashboard page uses Next.js client-side `<Link>` navigation.
+   Typing a `/dashboard/...` URL directly into the browser's address bar
+   (a hard navigation) loses the in-memory access token and currently
+   bounces back to `/login` — this is the same pre-existing Phase 2
+   CSRF-cookie-path limitation documented in docs/security.md, not
+   something Phase 6 introduced. Navigate via the app's own links/nav, not
+   the address bar, when testing locally.
+
 ## 2. Frontend
 
 ```bash
@@ -290,3 +311,30 @@ owning user id) to the `cleanup_tenants` fixture, which re-verifies the
 database name and deletes exactly those rows — cascading to their
 conversations/messages/receptionists — once the test finishes, pass or
 fail; nothing broader is ever truncated or reset.
+
+### Frontend tests run sequentially, deliberately
+
+```bash
+cd frontend
+npm test         # vitest — watch mode
+npm run test:run # vitest — single run (same as plain `vitest run`)
+```
+
+`frontend/vitest.config.ts` sets `fileParallelism: false`. This is not a
+placeholder or a workaround for a specific flaky test — it was added
+after directly measuring, on this development machine (12 CPU cores but
+only ~3.5GB RAM), that Vitest's default `forks` pool spawns one worker
+process per core, and that memory pressure from several such workers
+running concurrently (each accumulating jsdom/React memory across the
+test files it runs, never releasing it back to the OS between them) was
+the actual, confirmed cause of transient per-test timeouts under the
+default parallel configuration — not a DOM-cleanup leak, a shared mock,
+a leftover fake timer, or test ordering (all of those were checked and
+ruled out first). See the in-line comment in `vitest.config.ts` for the
+full evidence chain and docs/PROGRESS.md's Phase 6 follow-up section for
+the 20-repeated-run stability confirmation. `npm test`, `npm run
+test:run`, and plain `vitest`/`vitest run` all resolve to this same
+sequential configuration — there is no separate "fast but flaky" mode
+left anywhere in this project. On a machine with more memory headroom,
+removing this line would very likely be safe, but it should be
+re-verified with the same kind of direct measurement, not assumed.

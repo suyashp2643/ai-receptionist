@@ -1,9 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useAuth } from "@/lib/auth-context";
+import { useDashboardContext } from "@/components/dashboard/DashboardContext";
 import { listLocations, listReceptionists, listServices, type Receptionist } from "@/lib/phase3-api";
 import {
   activateWidgetInstallation,
@@ -28,11 +26,7 @@ import { buttonClass, errorMessage, inputClass, secondaryButtonClass, dangerButt
 import { getApiBaseUrl } from "@/lib/config";
 
 export default function WidgetInstallationPage() {
-  const { user, memberships, isLoading: authLoading } = useAuth();
-  const router = useRouter();
-  const membership = memberships[0];
-  const tenantId = membership?.tenant_id ?? null;
-  const canManage = membership?.role === "owner" || membership?.role === "admin";
+  const { tenantId, canManage } = useDashboardContext();
 
   const [receptionists, setReceptionists] = useState<Receptionist[]>([]);
   const [selectedReceptionistId, setSelectedReceptionistId] = useState("");
@@ -51,11 +45,6 @@ export default function WidgetInstallationPage() {
   const [locationNames, setLocationNames] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    if (!authLoading && !user) router.replace("/login");
-  }, [authLoading, user, router]);
-
-  useEffect(() => {
-    if (!tenantId) return;
     listReceptionists(tenantId)
       .then((list) => {
         setReceptionists(list);
@@ -102,15 +91,6 @@ export default function WidgetInstallationPage() {
       .then(setSnippet)
       .catch((err) => setError(errorMessage(err)));
   }, [tenantId, selectedInstallation]);
-
-  if (authLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <p className="text-neutral-500">Loading…</p>
-      </div>
-    );
-  }
-  if (!user || !membership || !tenantId) return null;
 
   async function handleCreate() {
     if (!tenantId || !selectedReceptionistId) return;
@@ -163,14 +143,7 @@ export default function WidgetInstallationPage() {
   }
 
   return (
-    <div className="min-h-screen p-8">
-      <div className="max-w-4xl mx-auto flex flex-col gap-6">
-        <div>
-          <Link href="/dashboard" className="text-sm text-neutral-500">
-            ← Dashboard
-          </Link>
-        </div>
-
+    <div className="max-w-4xl mx-auto w-full flex flex-col gap-6">
         <header className="flex flex-wrap items-center justify-between gap-3">
           <h1 className="text-xl font-semibold tracking-tight">Website widget</h1>
           <span
@@ -313,7 +286,6 @@ export default function WidgetInstallationPage() {
           serviceNames={serviceNames}
           locationNames={locationNames}
         />
-      </div>
     </div>
   );
 }

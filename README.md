@@ -5,9 +5,12 @@ industry templates (real estate, clinics, hotels, restaurants, automotive,
 law firms, education, home services, SaaS, custom) configure it via data,
 not forked code.
 
-Status: **Phase 5 — public embeddable website widget, browser voice, secure
-public conversations, contact capture, appointment requests, human handoff,
-and installation management**. See
+Status: **Phase 6 — client operations dashboard: real analytics, conversation/
+contact/enquiry/appointment/handoff management, internal notes, an audit
+log, role-based permissions, and CSV export — on top of Phase 5's public
+embeddable website widget, browser voice, secure public conversations,
+contact capture, appointment requests, human handoff, and installation
+management**. See
 [docs/PROGRESS.md](docs/PROGRESS.md) for what's implemented so far,
 [docs/architecture.md](docs/architecture.md) for the system design, and
 [docs/security.md](docs/security.md) for the auth/tenant-isolation/public-widget
@@ -30,7 +33,13 @@ threat model.
   deterministic zero-cost mock provider — real providers (OpenAI, Anthropic)
   exist only as disabled adapters until credentials are configured; the
   public widget (Phase 5) reuses this engine unchanged
-- Zero-cost by design through Phase 5: no paid APIs, no external embeddings,
+- Client operations dashboard (Phase 6): tenant-scoped analytics computed
+  live via explicit SQL aggregates (no cache, no background job), a
+  conversation/contact/enquiry/appointment/handoff management surface,
+  staff-only internal notes, an append-only activity/audit log, and
+  owner/admin-only CSV export — all on the existing Postgres database and
+  mock AI provider, no new external service
+- Zero-cost by design through Phase 6: no paid APIs, no external embeddings,
   no telephony/SMS/email providers — deterministic local chunking +
   PostgreSQL full-text search for knowledge, deterministic mock AI provider,
   browser-native (not server-side) voice

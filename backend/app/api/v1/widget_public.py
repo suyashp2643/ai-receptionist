@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Callable, Generator
 from contextlib import AbstractContextManager
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -144,8 +144,23 @@ def get_widget_config(
     )
 
 
+def _is_platform_preview_request(request: Request, settings: Settings) -> bool:
+    """Re-checks the same Origin header validate_widget_origin already
+    validated, against the same platform_preview_origins_list, to compute a
+    server-verified (never client-supplied) classification persisted on the
+    new WidgetVisitorSession — see its docstring and
+    app/api/widget_deps.py's validate_widget_origin."""
+    origin = request.headers.get("origin")
+    return origin is not None and origin in settings.platform_preview_origins_list
+
+
 def _start_conversation_and_session(
-    db: Session, *, installation: WidgetInstallation, payload: StartConversationRequest, settings: Settings
+    db: Session,
+    *,
+    installation: WidgetInstallation,
+    payload: StartConversationRequest,
+    settings: Settings,
+    is_platform_preview: bool,
 ) -> WidgetSessionStartResponse:
     provider = _resolve_provider_or_500(settings)
     orchestrator = ConversationOrchestrator(
@@ -172,6 +187,7 @@ def _start_conversation_and_session(
         widget_installation_id=installation.id,
         conversation_id=conversation.id,
         ttl_hours=settings.widget_visitor_session_ttl_hours,
+        is_platform_preview=is_platform_preview,
     )
     db.commit()
     return WidgetSessionStartResponse(
@@ -192,11 +208,18 @@ def _start_conversation_and_session(
 )
 def create_widget_session(
     payload: StartConversationRequest,
+    request: Request,
     installation: WidgetInstallation = Depends(get_active_widget_installation),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> WidgetSessionStartResponse:
-    return _start_conversation_and_session(db, installation=installation, payload=payload, settings=settings)
+    return _start_conversation_and_session(
+        db,
+        installation=installation,
+        payload=payload,
+        settings=settings,
+        is_platform_preview=_is_platform_preview_request(request, settings),
+    )
 
 
 @router.post(
@@ -210,6 +233,7 @@ def create_widget_session(
 )
 def create_widget_conversation(
     payload: StartConversationRequest,
+    request: Request,
     ctx: WidgetVisitorContext = Depends(get_widget_visitor_context_from_token),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
@@ -219,7 +243,13 @@ def create_widget_conversation(
     /sessions handshake once) — this is the "start a new conversation"
     action from within an already-open widget, not a general-purpose
     unauthenticated conversation factory."""
-    return _start_conversation_and_session(db, installation=ctx.installation, payload=payload, settings=settings)
+    return _start_conversation_and_session(
+        db,
+        installation=ctx.installation,
+        payload=payload,
+        settings=settings,
+        is_platform_preview=_is_platform_preview_request(request, settings),
+    )
 
 
 @router.get(

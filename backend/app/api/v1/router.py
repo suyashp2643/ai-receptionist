@@ -1,13 +1,19 @@
 from fastapi import APIRouter
 
 from app.api.v1 import (
+    activity,
+    analytics,
     auth,
     conversations,
+    dashboard_conversations,
+    dashboard_records,
+    exports,
     faqs,
     health,
     industry_templates,
     knowledge,
     locations,
+    notes,
     onboarding,
     receptionists,
     services,
@@ -34,3 +40,9 @@ api_router.include_router(conversations.router, tags=["conversations"])
 api_router.include_router(widget_installations.router, tags=["widget-installations"])
 api_router.include_router(widget_records.router, tags=["widget-records"])
 api_router.include_router(widget_public.router, tags=["widget-public"])
+api_router.include_router(analytics.router, tags=["analytics"])
+api_router.include_router(dashboard_conversations.router, tags=["dashboard-conversations"])
+api_router.include_router(dashboard_records.router, tags=["dashboard-records"])
+api_router.include_router(notes.router, tags=["notes"])
+api_router.include_router(activity.router, tags=["activity"])
+api_router.include_router(exports.router, tags=["exports"])

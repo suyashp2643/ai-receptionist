@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useAuth } from "@/lib/auth-context";
+import { usePathname } from "next/navigation";
+import { useDashboardContext } from "@/components/dashboard/DashboardContext";
 
 const NAV = [
   { href: "/dashboard/settings/business-profile", label: "Business profile" },
@@ -15,6 +15,11 @@ const NAV = [
   { href: "/dashboard/settings/actions", label: "Actions" },
 ];
 
+/** The settings section's own sub-navigation, rendered inside the unified
+ * dashboard shell's content area (see app/dashboard/layout.tsx) — this is
+ * a second-level nav specific to /dashboard/settings/*, not a competing
+ * top-level shell. Auth/loading/tenant resolution is handled once, by the
+ * layout; this component only reads the already-resolved context. */
 export function SettingsShell({
   title,
   children,
@@ -22,43 +27,29 @@ export function SettingsShell({
   title: string;
   children: (ctx: { tenantId: string; canEdit: boolean }) => ReactNode;
 }) {
-  const { user, memberships, isLoading } = useAuth();
-  const router = useRouter();
-  const membership = memberships[0];
-
-  useEffect(() => {
-    if (!isLoading && !user) router.replace("/login");
-  }, [isLoading, user, router]);
-
-  if (isLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <p className="text-neutral-500">Loading…</p>
-      </div>
-    );
-  }
-  if (!user || !membership) return null;
-
-  const canEdit = membership.role === "owner" || membership.role === "admin";
+  const { tenantId, canManage } = useDashboardContext();
+  const pathname = usePathname();
 
   return (
-    <div className="min-h-screen p-8">
-      <div className="max-w-4xl mx-auto flex flex-col md:flex-row gap-8">
-        <nav className="flex md:flex-col gap-2 md:w-48 shrink-0 flex-wrap" aria-label="Settings">
-          <Link href="/dashboard" className="text-sm text-neutral-500 mb-2">
-            ← Dashboard
+    <div className="flex flex-col md:flex-row gap-8">
+      <nav className="flex md:flex-col gap-2 md:w-48 shrink-0 flex-wrap" aria-label="Settings">
+        {NAV.map((item) => (
+          <Link
+            key={item.href}
+            href={item.href}
+            aria-current={pathname === item.href ? "page" : undefined}
+            className={`text-sm rounded px-2 py-1.5 ${
+              pathname === item.href ? "bg-black/5 dark:bg-white/10 font-medium" : "hover:bg-black/5 dark:hover:bg-white/10"
+            }`}
+          >
+            {item.label}
           </Link>
-          {NAV.map((item) => (
-            <Link key={item.href} href={item.href} className="text-sm rounded px-2 py-1.5 hover:bg-black/5 dark:hover:bg-white/10">
-              {item.label}
-            </Link>
-          ))}
-        </nav>
-        <div className="flex-1 flex flex-col gap-4">
-          <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
-          {!canEdit && <p className="text-sm text-neutral-500">You have read-only access to this workspace.</p>}
-          {children({ tenantId: membership.tenant_id, canEdit })}
-        </div>
+        ))}
+      </nav>
+      <div className="flex-1 flex flex-col gap-4">
+        <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
+        {!canManage && <p className="text-sm text-neutral-500">You have read-only access to this workspace.</p>}
+        {children({ tenantId, canEdit: canManage })}
       </div>
     </div>
   );

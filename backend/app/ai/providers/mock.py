@@ -110,6 +110,26 @@ def _format_services(output: dict) -> str:
     return f"We offer: {names}."
 
 
+# The set of exact response substrings the mock provider uses when it
+# genuinely found nothing to answer a question with — as opposed to a
+# legitimate negative answer about the business's own configuration (e.g.
+# "I don't see any services listed yet."). Phase 6's analytics "unanswered /
+# fallback responses" metric (app/services/analytics_service.py) counts
+# assistant messages containing one of these, imported from here rather
+# than re-typed, so the two can never drift out of sync. This is
+# necessarily mock-provider-specific — a real LLM provider would need its
+# own structured "I don't know" signal, not string matching, before this
+# metric could extend to it; see docs/architecture.md's Phase 6 analytics
+# section for the documented limitation.
+FALLBACK_RESPONSE_MARKERS: frozenset[str] = frozenset(
+    {
+        "I couldn't find anything about that in what's been shared with me.",
+        "I couldn't find that information in what's been shared with me.",
+        "I don't have that information available right now, and I don't want to guess",
+    }
+)
+
+
 def _format_knowledge_results(output: dict) -> str:
     results = output.get("results", [])
     if not results:
@@ -216,6 +236,7 @@ class MockProvider(AIProvider):
             content=content,
             finish_reason=ProviderFinishReason.STOP,
             provider_message_id=f"mock-{_deterministic_id(content)}",
+            is_fallback=any(marker in content for marker in FALLBACK_RESPONSE_MARKERS),
         )
 
     def stream(self, request: GenerateRequest) -> Iterator[StreamChunk]:
@@ -223,10 +244,11 @@ class MockProvider(AIProvider):
         if tool_call is not None:
             yield StreamChunk(tool_calls=[tool_call], finish_reason=ProviderFinishReason.TOOL_CALLS)
             return
+        is_fallback = any(marker in content for marker in FALLBACK_RESPONSE_MARKERS)
 
         words = content.split(" ") if content else []
         if not words:
-            yield StreamChunk(delta="", finish_reason=ProviderFinishReason.STOP)
+            yield StreamChunk(delta="", finish_reason=ProviderFinishReason.STOP, is_fallback=is_fallback)
             return
 
         chunk_size = 4
@@ -238,6 +260,7 @@ class MockProvider(AIProvider):
                 delta=delta,
                 finish_reason=ProviderFinishReason.STOP if is_last else None,
                 provider_message_id=f"mock-{_deterministic_id(content)}" if is_last else None,
+                is_fallback=is_fallback if is_last else False,
             )
 
     def summarize(self, context: ConversationContext) -> SummaryResult:

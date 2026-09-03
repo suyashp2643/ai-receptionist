@@ -12,9 +12,30 @@ from sqlalchemy.orm import Session
 from app.core.timezones import VALID_TIMEZONES, normalize_timezone
 from app.models.appointment_request import AppointmentRequest
 from app.models.business_location import BusinessLocation
+from app.models.enums import AppointmentRequestStatus
 from app.repositories.appointment_request import AppointmentRequestRepository
 from app.repositories.business_location import BusinessLocationRepository
 from app.repositories.service import ServiceRepository
+from app.services import activity_service
+from app.services.concurrency import apply_versioned_update
+
+# Owner/admin-only workflow (see app/api/deps.py's require_tenant_role usage
+# in app/api/v1/dashboard_records.py) — never automatically transitioned,
+# and never notifies the visitor (Phase 6 has no delivery mechanism; see
+# docs/security.md).
+APPOINTMENT_STATUS_TRANSITIONS: dict[AppointmentRequestStatus, frozenset[AppointmentRequestStatus]] = {
+    AppointmentRequestStatus.PENDING: frozenset(
+        {AppointmentRequestStatus.CONFIRMED, AppointmentRequestStatus.DECLINED, AppointmentRequestStatus.CANCELLED}
+    ),
+    AppointmentRequestStatus.CONFIRMED: frozenset({AppointmentRequestStatus.CANCELLED}),
+    AppointmentRequestStatus.DECLINED: frozenset(),
+    AppointmentRequestStatus.CANCELLED: frozenset(),
+}
+
+
+class InvalidAppointmentStatusTransitionError(Exception):
+    pass
+
 
 MAX_PAST_DAYS_ALLOWED = 0  # "today" in the governing timezone is the earliest acceptable date
 MAX_FUTURE_DAYS_ALLOWED = 365
@@ -43,9 +64,7 @@ def _validate_requested_date(requested_date: date, *, governing_timezone: str) -
         )
 
 
-def _resolve_location(
-    db: Session, *, tenant_id: uuid.UUID, location_id: uuid.UUID | None
-) -> BusinessLocation | None:
+def _resolve_location(db: Session, *, tenant_id: uuid.UUID, location_id: uuid.UUID | None) -> BusinessLocation | None:
     if location_id is None:
         return None
     location = BusinessLocationRepository(db, tenant_id).get_active(location_id)
@@ -105,9 +124,7 @@ def create_appointment_request(
     # combination, so it is checked explicitly rather than left implicit.
     if service is not None and service.location_id is not None:
         if location is not None and location.id != service.location_id:
-            raise InvalidAppointmentRequestError(
-                "The selected service is not offered at the selected location."
-            )
+            raise InvalidAppointmentRequestError("The selected service is not offered at the selected location.")
         if location is None:
             location = _resolve_location(db, tenant_id=tenant_id, location_id=service.location_id)
             location_id = service.location_id
@@ -130,5 +147,47 @@ def create_appointment_request(
         idempotency_key=idempotency_key,
     )
     repo.add(appointment_request)
+    db.flush()
+    return appointment_request
+
+
+def update_status(
+    db: Session,
+    *,
+    tenant_id: uuid.UUID,
+    actor_user_id: uuid.UUID,
+    appointment_request: AppointmentRequest,
+    new_status: AppointmentRequestStatus,
+    expected_version: int,
+) -> AppointmentRequest:
+    """Owner/admin-only (enforced by the caller's route dependency, not
+    here). Never sends any notification to the visitor — Phase 6 has no
+    delivery mechanism at all; the dashboard UI must say so explicitly.
+    Raises InvalidAppointmentStatusTransitionError (422) or
+    VersionConflictError (409)."""
+    current = appointment_request.status
+    if new_status == current:
+        raise InvalidAppointmentStatusTransitionError(f"Appointment request is already '{current.value}'.")
+    allowed = APPOINTMENT_STATUS_TRANSITIONS.get(current, frozenset())
+    if new_status not in allowed:
+        raise InvalidAppointmentStatusTransitionError(
+            f"Cannot move an appointment request from '{current.value}' to '{new_status.value}'."
+        )
+
+    apply_versioned_update(
+        db,
+        appointment_request,
+        expected_version=expected_version,
+        values={"status": new_status},
+    )
+    activity_service.record(
+        db,
+        tenant_id=tenant_id,
+        actor_user_id=actor_user_id,
+        action_type="appointment_request.status_changed",
+        entity_type="appointment_request",
+        entity_id=appointment_request.id,
+        metadata={"from": current.value, "to": new_status.value},
+    )
     db.flush()
     return appointment_request

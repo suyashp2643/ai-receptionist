@@ -24,10 +24,16 @@ def issue_session(
     widget_installation_id: uuid.UUID,
     conversation_id: uuid.UUID,
     ttl_hours: int,
+    is_platform_preview: bool = False,
 ) -> tuple[WidgetVisitorSession, str]:
     """Returns (session, raw_token). `raw_token` exists only in this return
     value and the caller's immediate HTTP response — it is never logged,
-    stored, or reconstructible from `session.token_hash`."""
+    stored, or reconstructible from `session.token_hash`.
+
+    `is_platform_preview` must be computed by the caller from the request's
+    own Origin header against Settings.platform_preview_origins_list — never
+    accept it as a client-supplied field (see WidgetVisitorSession's
+    docstring)."""
     raw_token = generate_visitor_capability_token()
     session = WidgetVisitorSession(
         tenant_id=tenant_id,
@@ -35,6 +41,7 @@ def issue_session(
         conversation_id=conversation_id,
         token_hash=hash_visitor_capability_token(raw_token),
         expires_at=datetime.now(UTC) + timedelta(hours=ttl_hours),
+        is_platform_preview=is_platform_preview,
     )
     WidgetVisitorSessionRepository(db, tenant_id).add(session)
     db.flush()

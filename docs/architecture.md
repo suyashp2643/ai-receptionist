@@ -706,3 +706,241 @@ Regression coverage: `frontend/src/app/dashboard/receptionist/widget/page.test.t
 ("live local preview" describe block — activation-gating, real bundle/config
 URL construction, sandbox attributes, and restart-changes-the-src) and
 `tests/test_widget_public_api.py::TestWidgetConfig::test_platform_preview_origin_is_always_allowed`.
+
+## Client operations dashboard (implemented — Phase 6)
+
+Everything below is new in Phase 6: a full operations surface over the data
+Phase 4/5 already capture — conversations, contacts, enquiries,
+appointments, and handoffs — plus internal notes, an audit log, and
+tenant-scoped analytics. Nothing here required a new external service; it
+runs entirely on the existing Postgres database, the existing mock AI
+provider, and the existing FastAPI/Next.js stack.
+
+### Source classification is server-verified, not client-claimed
+
+The dashboard needs to distinguish three kinds of conversation: genuine
+visitor traffic (`widget`), the dashboard's own live local preview
+(`preview`), and the private test console (`test`). `test` is trivial
+(`Conversation.mode == TEST`, set server-side, never client-chosen). The
+`widget`/`preview` distinction reuses the Phase 5 follow-up's platform-
+preview-origin check: `WidgetVisitorSession.is_platform_preview` is set at
+session-creation time from the request's own `Origin` header against
+`Settings.platform_preview_origins_list` — never from
+`visitor_reference` or any other client-supplied field, so a real
+customer's widget embed cannot spoof either direction. One function,
+`app/core/conversation_source.py::source_case_expression` (and its Python
+twin, `classify`), is the single place this logic lives — the conversation
+list, conversation detail, and every analytics aggregate all call it,
+so the same conversation is never classified two different ways in two
+different places. `unique_visitor_sessions` is currently numerically
+identical to `genuine_widget_conversations + preview_conversations`
+because a `WidgetVisitorSession` is 1:1 with the conversation it
+authorizes today — exposed as its own metric anyway since a future phase
+could let one session span multiple conversations.
+
+### Analytics: explicit aggregates, never a loaded transcript
+
+`app/services/analytics_service.py` computes every overview/timeseries
+number via a small, fixed number of `SELECT COUNT/AVG ... FILTER (WHERE
+...)` queries — never by loading every row of a list and counting in
+Python, and never one query per day for the timeseries (three queries
+total, each `GROUP BY` a `date_trunc`-style bucket, cover the whole
+requested range). The module's own docstring is the canonical numerator/
+denominator definition for every metric; see it for the full accounting.
+Two points worth calling out here:
+
+- **Estimated staff time saved is a single, global, configurable
+  assumption** (`Settings.estimated_staff_minutes_per_conversation`,
+  default 5.0 minutes) multiplied by the genuine-widget-conversation
+  count for the period — it has no per-tenant empirical basis, is always
+  labeled an estimate (`estimated_staff_time_saved_minutes_is_estimate:
+  true` in the API response, and in the UI), and is never described as
+  revenue.
+- **"Unanswered / fallback responses" is currently mock-provider-only.**
+  The signal is part of the provider-independent contract
+  (`GenerateResult`/`StreamChunk.is_fallback` in
+  `app/ai/providers/base.py`), so any future real-LLM provider *can*
+  populate it — but only `MockProvider` currently does, by checking its
+  own composed response text against a small, explicit set of "found
+  nothing" markers (`app/ai/providers/mock.py::FALLBACK_RESPONSE_MARKERS`).
+  This is documented as a known limitation, not silently glossed over: the
+  metric will always read `0` for a tenant using a non-mock provider until
+  that provider implements its own truthful signal.
+
+Every count-based metric defaults to **excluding** `test`/`preview`
+sources; callers pass `include_test_preview=true` to see all three
+combined. The three source counts are always broken out individually
+regardless, so the excluded volume stays visible even in the default view.
+Date-range presets (`today`/`7d`/`30d`/`custom`) are resolved as whole
+calendar days in the **tenant's own timezone**
+(`Tenant.timezone`, already a Phase 1 field) and converted to UTC bounds
+before touching the database — Postgres never does timezone arithmetic
+itself. A custom range is capped at `Settings.analytics_max_range_days`
+(366 days by default) so a client cannot request an unbounded scan.
+
+**Analytics performance and the future pre-aggregation boundary**: every
+overview/timeseries call computes its numbers live, on request, via the
+aggregate queries described above — there is no cache, materialized view,
+or background rollup job. `tests/test_dashboard_performance.py` asserts
+the endpoint issues a small, fixed number of queries; the Phase 6
+follow-up round additionally measured this directly against a real local
+Postgres instance with a throwaway tenant seeded at two volumes (500 and
+8,000 conversations, each with a realistic share of messages, contacts,
+enquiries, appointment requests, and handoffs), counting actual SQL
+statements via a SQLAlchemy `before_cursor_execute` listener rather than
+inferring it from code review:
+
+| Endpoint | Queries (constant, 500 vs. 8,000 conversations) | Wall time @ 500 | Wall time @ 8,000 |
+|---|---|---|---|
+| `GET .../analytics/overview` | 9 (1 tenant-timezone lookup + 8 aggregate queries — see `analytics_service.get_overview`'s numbered comments) | 281 ms | 208 ms |
+| `GET .../conversations` (list, page 1) | 3 (1 tenant-timezone lookup + `COUNT` + paginated `SELECT`) | 36 ms | 32 ms |
+| `GET .../enquiries` (list, page 1) | 3 (same shape) | 11 ms | 9 ms |
+
+Query count was confirmed identical at both volumes — the fixed-query-count
+claim is measured, not assumed. Wall time did **not** measurably increase
+with the 16x row-volume increase at this scale, and did not decrease
+monotonically either (281ms → 208ms includes normal local-Postgres cache
+warm-up noise between runs, not a real trend) — both are well under any
+perceptible latency budget at these volumes. `EXPLAIN (ANALYZE, BUFFERS)`
+against the 8,000-row volume confirmed every one of these queries uses the
+existing single-column `tenant_id` index (`ix_conversations_tenant_id`,
+`ix_enquiries_tenant_id`) — **no sequential scan occurred at this volume**.
+However, the date-range bound (`started_at`/`created_at`) is applied as a
+post-scan `Filter`, not a second index condition, because there is no
+composite `(tenant_id, started_at)` index — the planner scans every row
+for the tenant via the `tenant_id` index, then filters by date in memory.
+This is invisible at hundreds or low thousands of rows per tenant (172
+buffer pages read, sub-6ms execution time even at 8,000 rows in this test)
+but is the concrete mechanism behind the "large tenant" ceiling: **a single
+tenant accumulating conversation volume such that its own row count no
+longer fits comfortably in a handful of buffer pages** is what will
+eventually make this Filter step, not the aggregate itself, the slow part
+— independent of how many *other* tenants exist, since every query is
+already `tenant_id`-scoped. This local, single-machine, single-tenant
+8,000-row measurement is **not** a production-scale benchmark (real
+concurrent load, connection contention, a much larger and fuller buffer
+cache, and true multi-tenant row distribution are all untested here) — it
+demonstrates the query shape is fixed-count and index-scan-based at this
+scale, nothing more. At that point, a future phase should add either a
+composite `(tenant_id, started_at)` / `(tenant_id, created_at)` index (the
+cheapest first step, before reaching for pre-aggregation) or, once even
+that stops being enough, a scheduled daily/hourly rollup table
+(pre-aggregated counts per tenant/receptionist/day, computed by a
+background job, with the overview endpoint reading from it instead of the
+raw tables) or a materialized view refreshed on the same cadence. Nothing
+about the current API contract (the `AnalyticsOverviewResponse`/
+`TimeseriesPoint` shapes) would need to change for either migration — only
+what backs `get_overview`/`get_timeseries` internally.
+
+### Optimistic concurrency and the atomic handoff claim
+
+Enquiries, appointment requests, and human handoffs each carry a `version`
+integer. Every status-change endpoint requires the caller to supply the
+`version` it last read; `app/services/concurrency.py::apply_versioned_update`
+applies the change via one `UPDATE ... WHERE id = ? AND version = ?`
+statement that also increments `version` — a stale version means the
+`UPDATE` matches zero rows, which the helper turns into a
+`VersionConflictError` (409). This is deliberately simpler than optimistic-
+locking schemes that re-read after a conflict: the dashboard's response is
+just "reload and try again," never a silent merge.
+
+Claiming a handoff has a stricter requirement than "don't overwrite a
+stale read" — two tenant members can click "claim" at the *same* open
+handoff at the *same* moment, and at most one may win, with no window
+where both could succeed. `HumanHandoffRepository.claim_atomically` uses a
+single conditional `UPDATE human_handoffs SET status = 'claimed', ... WHERE
+id = ? AND status = 'open'` — never a `SELECT` followed by a check followed
+by a separate `UPDATE`, which would leave exactly the race window this
+exists to close. `human_handoff_service.update_status()` (resolve/cancel)
+deliberately refuses `CLAIMED` as a target for this same reason: routing
+that transition through the generic version-checked path would reintroduce
+the race `claim()` exists to avoid.
+
+This was verified against genuinely separate database connections, not
+just a single already-serialized test session — see
+`tests/integration/test_handoff_claim_concurrency.py` (`pytest -m
+multiconn`), which drives two real HTTP requests from two real tenant
+members through a `ThreadPoolExecutor`, exactly mirroring the pattern
+`tests/integration/test_conversation_concurrency.py` established in Phase 4
+for the same reason: `tests/conftest.py`'s shared-session fixture collapses
+what would be independently-pooled connections in production into one,
+which would hide a race like this entirely.
+
+### Internal notes: typed foreign keys, not a polymorphic pair
+
+`InternalNote` attaches to exactly one of five entity types
+(conversation/contact/enquiry/appointment_request/human_handoff) via five
+nullable, typed foreign keys — each `ON DELETE CASCADE` to its own parent
+table — rather than a generic `(entity_type: str, entity_id: uuid)` pair.
+A plain FK gives real referential integrity a polymorphic pair cannot (a
+note can never dangle after its parent is deleted, and the database itself
+rejects a reference to a nonexistent row); a `CHECK (num_nonnulls(...) =
+1)` constraint enforces "exactly one target." The service layer
+(`app/services/notes_service.py`) additionally verifies the target exists
+*for this tenant specifically* — using the exact same tenant-scoped
+repository every other route uses for that resource — before creating a
+note, since a plain FK to e.g. `enquiries.id` is not itself tenant-composite
+and so cannot reject a cross-tenant reference at the database level on its
+own. Notes are never read by the AI orchestrator and never served by any
+public-widget route.
+
+### Activity log: append-only, no FK to the entity it describes
+
+`ActivityEvent` is written only through
+`app/services/activity_service.py::record` — no route creates, edits, or
+deletes one directly. `entity_id` is deliberately a plain UUID with no
+foreign key: an audit record must remain readable even after the row it
+describes is later deleted (e.g. a cascade-deleted conversation), which a
+FK would prevent. `event_metadata` is restricted by convention (enforced
+in code review, the same way every other "never log this" rule in this
+codebase is) to small, safe fields such as an old/new status pair — never
+a secret, token hash, password, or full message/transcript body.
+
+### Role permissions: two dependencies, not scattered checks
+
+Every dashboard route reuses the Phase 2 `require_tenant_role(minimum)`
+dependency factory — there is no new permission-check mechanism. The
+policy: any active tenant member may view every resource and take the
+day-to-day operational actions (update an enquiry's status, claim or
+resolve a handoff, add or edit their own notes); confirming/declining/
+cancelling an appointment, cancelling a handoff, exporting data, and
+deleting another member's note require `admin` or `owner`. The one
+handoff-specific rule (member may resolve but not cancel) is expressed as
+a single explicit role check in `app/api/v1/dashboard_records.py`, not a
+new dependency, since it is the only asymmetric case in the whole surface.
+See docs/security.md's permission matrix for the complete table.
+
+### Dashboard shell
+
+`frontend/src/app/dashboard/layout.tsx` is a single Next.js App Router
+layout wrapping every route under `/dashboard` exactly once — Overview,
+Conversations, Contacts, Enquiries, Appointments, Handoffs, Activity,
+Settings (all seven pages), the private test console, and widget
+installation management. It renders `DashboardShell`
+(`frontend/src/components/dashboard/DashboardShell.tsx`), which owns the
+auth/loading/redirect boilerplate, tenant identity and role, main
+navigation with active-route highlighting (a single ten-item nav list,
+not a page tier plus an overflow "more" menu — Settings, the test
+console, and widget management are direct top-level links, not
+menu-only), and a responsive mobile drawer using the same nav list. Pages
+no longer receive shell state via a render-prop; they call
+`useDashboardContext()` (`frontend/src/components/dashboard/
+DashboardContext.tsx`), a React context populated once by the layout,
+which throws if called outside it — a programming-error guard, not a
+runtime user-facing state, since the layout never renders `children`
+until auth has resolved.
+
+This replaced Phase 6's original per-page `<DashboardShell
+title="X">{({tenantId}) => ...}</DashboardShell>` render-prop wrapper,
+which the Phase 6 follow-up round's gap review found produced a shell
+duplicated per page rather than a single shared instance, and which
+never covered the settings/test-console/widget pages at all (they kept
+separate, inconsistent layouts). `SettingsShell`
+(`frontend/src/app/dashboard/settings/SettingsShell.tsx`) deliberately
+kept its own render-prop API unchanged (`children({tenantId, canEdit})`)
+— it now reads `useDashboardContext()` internally instead of `useAuth()`
+directly — so its 7 existing consumer pages needed zero code changes.
+The private test console and widget-management pages were rewritten to
+read `useDashboardContext()` directly and dropped their own
+auth-loading/redirect/back-link boilerplate, since the layout now
+supplies all of it once.

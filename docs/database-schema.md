@@ -625,3 +625,109 @@ serves it yet.
   snapshot briefly stale, self-correcting on the conversation's next turn.
   Acceptable for a local review record; not used as a source of truth for
   anything transactional.
+
+## Phase 6 tables
+
+### `internal_notes` (tenant-owned)
+
+Staff-only annotations on exactly one operational record. Five nullable,
+typed foreign keys (`conversation_id`, `contact_id`, `enquiry_id`,
+`appointment_request_id`, `human_handoff_id`), each `ON DELETE CASCADE` to
+its parent, rather than a polymorphic `(entity_type, entity_id)` pair — a
+plain FK gives real referential integrity a generic pair cannot (a note can
+never dangle after its parent is deleted). A `CHECK` constraint,
+`num_nonnulls(...) = 1`, enforces "exactly one target." Soft-deleted via
+`deleted_at` (never hard-deleted, so a deletion is itself auditable).
+**Never** read by the AI orchestrator and **never** served to the public
+widget — no route anywhere exposes this table to a visitor.
+
+### `activity_events` (tenant-owned, append-only)
+
+The operational audit log: `actor_user_id` (nullable — reserved for future
+system-generated events), `action_type` (a free string, e.g.
+`"enquiry.status_changed"`), `entity_type` + `entity_id` (a plain UUID, no
+FK — an audit record must survive the deletion of the thing it describes),
+and `event_metadata` (JSONB; never a secret, token, password hash, or full
+message/transcript body — only small, safe summary fields like an old/new
+status pair). Written only by application services
+(`app/services/activity_service.py::record`); no route creates, edits, or
+deletes these directly, and no public-widget code path touches this table.
+
+### Modified tables
+
+- **`conversations`** gains `had_safety_event` and `had_clinic_emergency`
+  (booleans, default `false`) — set once, never cleared, by the
+  orchestrator the first time a safety directive fires. `had_clinic_emergency`
+  is a strict subset (only the `"clinic_urgent"` category), kept separately
+  visible so a genuine emergency is never folded into an ordinary handoff.
+- **`conversation_messages`** gains `is_fallback_response` (boolean,
+  default `false`) — set by the AI provider (see `GenerateResult`/
+  `StreamChunk` in `app/ai/providers/base.py`) when it found nothing to
+  answer a question with. Currently meaningful only for the mock provider —
+  see docs/architecture.md's Phase 6 analytics section for the full caveat.
+- **`widget_visitor_sessions`** gains `is_platform_preview` (boolean,
+  default `false`) — set server-side at session creation from the
+  request's `Origin` against `Settings.platform_preview_origins_list`,
+  never from a client-supplied field. This is the authoritative signal
+  Phase 6 uses to classify a conversation as `preview` vs. genuine
+  `widget` traffic (see `app/core/conversation_source.py`).
+- **`enquiries`**, **`appointment_requests`**, **`human_handoffs`** each
+  gain `version` (integer, default `1`) for optimistic concurrency —
+  every Phase 6 status-update endpoint requires the caller to supply the
+  `version` it last read; a mismatch means someone else wrote first (see
+  `app/services/concurrency.py`). Status *history* is the corresponding
+  `activity_events` rows, not this column.
+- **`human_handoffs`** additionally gains `assigned_user_id` (nullable FK
+  to `users.id`, `ON DELETE SET NULL`) — a plain FK, not tenant-composite,
+  since a `User` is not itself tenant-scoped; the service layer verifies
+  the assignee is an active member of the tenant before assigning.
+
+### `enquiry_status` enum lifecycle (Phase 6)
+
+Six new values were added via `ALTER TYPE enquiry_status ADD VALUE IF NOT
+EXISTS ...`: `contacted`, `appointment_requested`, `in_progress`, `won`,
+`lost`, `archived` — following the exact, already-accepted precedent from
+migration `1aa533d3cabf`'s `conversation_mode`/`conversation_channel`
+additions. `closed` (added in Phase 5) is **not** removed or rewritten:
+Postgres has no `ALTER TYPE ... DROP VALUE`, and rewriting every existing
+`enquiries` row's status would be a destructive migration for values that
+are otherwise harmless to leave defined. Instead, `closed` is treated as a
+legacy synonym of `archived` in the transition graph
+(`app/services/enquiry_service.py::ENQUIRY_STATUS_TRANSITIONS`) — reachable
+and terminal in exactly the same places, so no pre-Phase-6 row becomes a
+dead end. New rows are never written with `closed`; use `archived`.
+
+## Known limitations (Phase 6)
+
+Two gaps from Phase 6's original round — the dashboard shell not covering
+every authenticated route, and only one of five export buttons being
+wired into the UI — were resolved in the Phase 6 follow-up round (see
+docs/PROGRESS.md). The three limitations below remain, by explicit
+decision, as documented, out-of-scope gaps:
+
+- **No tenant switcher exists in the frontend.** `useAuth()`'s
+  `memberships` array can contain more than one tenant (a user can belong
+  to several), but every dashboard page always operates on
+  `memberships[0]` — there is no UI to pick a different one. This
+  predates Phase 6 (no earlier phase needed it either, since onboarding
+  always created exactly one tenant per new user) but is now more visible:
+  a user who is a member of two tenants cannot reach the second one's
+  dashboard at all through the UI. Out of scope for this phase; noted here
+  for whichever future phase adds team invitations.
+- **No "invite a teammate" endpoint exists.** Adding a second or third
+  tenant member (to test or use Phase 6's member-level permissions) requires
+  a direct database insert into `tenant_members` today — there is no
+  public API or dashboard UI for it. Phase 6's role-based permissions
+  (owner/admin/member) are fully implemented and tested against members
+  added this way; only the invitation mechanism itself is missing.
+- **Analytics are computed live, with no pre-aggregation.** Every
+  overview/timeseries call runs its aggregate queries against the raw
+  tables on every request — there is no cache, materialized view, or
+  scheduled rollup. Measured to be a fixed, small query count and a
+  sub-second response at up to 8,000 conversations per tenant on a single
+  local machine (see docs/architecture.md's "Analytics performance"
+  section for the exact numbers and methodology); this has **not** been
+  validated at production scale or under concurrent load, and the
+  document above also names the concrete future step (a composite
+  `(tenant_id, started_at)` index, then pre-aggregation if that stops
+  being enough).

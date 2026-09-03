@@ -2,7 +2,15 @@
 tenant-reviewable snapshot of qualification progress — separate from
 Conversation.collected_data (Phase 4) so a tenant has a stable local record
 even if the conversation itself is later pruned. Local-only: never synced
-to Revenue Brain or any external CRM in Phase 5."""
+to Revenue Brain or any external CRM in Phase 5.
+
+Phase 6 adds `update_status`: a validated, version-checked pipeline status
+transition. `WON`/`LOST` are manual operational labels a tenant applies to
+describe an outcome — this system never calculates or infers revenue from
+either, and no route anywhere computes a dollar amount from enquiry status.
+`CLOSED` is a legacy status (see EnquiryStatus's docstring) treated as a
+synonym of `ARCHIVED` in the transition graph — reachable and terminal in
+exactly the same places, so old data does not become a dead end."""
 
 import uuid
 
@@ -10,7 +18,53 @@ from sqlalchemy.orm import Session
 
 from app.models.conversation import Conversation
 from app.models.enquiry import Enquiry
+from app.models.enums import EnquiryStatus
 from app.repositories.enquiry import EnquiryRepository
+from app.services import activity_service
+from app.services.concurrency import apply_versioned_update
+
+# The allowed pipeline: keys are current statuses, values are the set of
+# statuses a PATCH may move *to* from there. Terminal statuses map to an
+# empty set. `CLOSED` (legacy) is given the exact same edges as `ARCHIVED`
+# so it behaves identically for any pre-Phase-6 row that still carries it.
+_TERMINAL: frozenset[EnquiryStatus] = frozenset()
+ENQUIRY_STATUS_TRANSITIONS: dict[EnquiryStatus, frozenset[EnquiryStatus]] = {
+    EnquiryStatus.NEW: frozenset(
+        {EnquiryStatus.QUALIFIED, EnquiryStatus.CONTACTED, EnquiryStatus.LOST, EnquiryStatus.ARCHIVED}
+    ),
+    EnquiryStatus.QUALIFIED: frozenset(
+        {
+            EnquiryStatus.CONTACTED,
+            EnquiryStatus.APPOINTMENT_REQUESTED,
+            EnquiryStatus.IN_PROGRESS,
+            EnquiryStatus.WON,
+            EnquiryStatus.LOST,
+            EnquiryStatus.ARCHIVED,
+        }
+    ),
+    EnquiryStatus.CONTACTED: frozenset(
+        {
+            EnquiryStatus.QUALIFIED,
+            EnquiryStatus.APPOINTMENT_REQUESTED,
+            EnquiryStatus.IN_PROGRESS,
+            EnquiryStatus.WON,
+            EnquiryStatus.LOST,
+            EnquiryStatus.ARCHIVED,
+        }
+    ),
+    EnquiryStatus.APPOINTMENT_REQUESTED: frozenset(
+        {EnquiryStatus.IN_PROGRESS, EnquiryStatus.WON, EnquiryStatus.LOST, EnquiryStatus.ARCHIVED}
+    ),
+    EnquiryStatus.IN_PROGRESS: frozenset({EnquiryStatus.WON, EnquiryStatus.LOST, EnquiryStatus.ARCHIVED}),
+    EnquiryStatus.WON: frozenset({EnquiryStatus.ARCHIVED}),
+    EnquiryStatus.LOST: frozenset({EnquiryStatus.ARCHIVED}),
+    EnquiryStatus.ARCHIVED: _TERMINAL,
+    EnquiryStatus.CLOSED: frozenset({EnquiryStatus.ARCHIVED}),
+}
+
+
+class InvalidEnquiryStatusTransitionError(Exception):
+    pass
 
 
 def upsert_enquiry_from_conversation(
@@ -45,5 +99,47 @@ def upsert_enquiry_from_conversation(
         if contact_id is not None:
             enquiry.contact_id = contact_id
 
+    db.flush()
+    return enquiry
+
+
+def update_status(
+    db: Session,
+    *,
+    tenant_id: uuid.UUID,
+    actor_user_id: uuid.UUID,
+    enquiry: Enquiry,
+    new_status: EnquiryStatus,
+    expected_version: int,
+) -> Enquiry:
+    """Validates the transition, applies it via a version-checked atomic
+    UPDATE, and records an ActivityEvent with the old/new status pair —
+    that event log is the actual status *history*; `version` only prevents
+    a silent overwrite. Raises InvalidEnquiryStatusTransitionError (422) or
+    VersionConflictError (409) — callers map these to HTTP responses."""
+    current = enquiry.status
+    if new_status == current:
+        raise InvalidEnquiryStatusTransitionError(f"Enquiry is already '{current.value}'.")
+    allowed = ENQUIRY_STATUS_TRANSITIONS.get(current, frozenset())
+    if new_status not in allowed:
+        raise InvalidEnquiryStatusTransitionError(
+            f"Cannot move an enquiry from '{current.value}' to '{new_status.value}'."
+        )
+
+    apply_versioned_update(
+        db,
+        enquiry,
+        expected_version=expected_version,
+        values={"status": new_status},
+    )
+    activity_service.record(
+        db,
+        tenant_id=tenant_id,
+        actor_user_id=actor_user_id,
+        action_type="enquiry.status_changed",
+        entity_type="enquiry",
+        entity_id=enquiry.id,
+        metadata={"from": current.value, "to": new_status.value},
+    )
     db.flush()
     return enquiry

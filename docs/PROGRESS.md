@@ -1502,5 +1502,355 @@ and a widget bundle-URL path mismatch. See docs/PROGRESS.md for the full
 accounting.
 ```
 
-**Awaiting explicit review and commit approval. Phase 6 has not been
+**Phase 5 approved and committed as `2c1b53c` on `main`.**
+
+## Phase 6 — Client Operations Dashboard, Analytics, and Permissions (complete, awaiting commit approval)
+
+### What was built
+
+A full operations surface over data Phase 4/5 already capture, entirely on
+the existing Postgres database and mock AI provider — no new external
+service, no paid API, no Redis dependency.
+
+- **Models/migration**: `InternalNote` and `ActivityEvent` (new tables);
+  `Conversation.had_safety_event`/`had_clinic_emergency`,
+  `ConversationMessage.is_fallback_response`,
+  `WidgetVisitorSession.is_platform_preview`,
+  `Enquiry`/`AppointmentRequest`/`HumanHandoff.version`,
+  `HumanHandoff.assigned_user_id` (new columns); six new `enquiry_status`
+  enum values (`contacted`, `appointment_requested`, `in_progress`, `won`,
+  `lost`, `archived`). One migration, `4782a62b4927`, reviewed by hand for
+  `server_default` on every new `NOT NULL` column (required against
+  Phases 1-5's existing non-empty tables) and an explicit FK constraint
+  name (autogenerate's `None` name would have broken `downgrade()`).
+- **Analytics**: `app/services/analytics_service.py` — every KPI from the
+  spec, each with a documented numerator/denominator, tenant-timezone date
+  boundaries, test/preview exclusion by default (server-verified via
+  `WidgetVisitorSession.is_platform_preview`, never client-claimed),
+  zero-safe rates, a 366-day range cap, and an explicitly-labeled
+  estimated-time-saved figure.
+- **Conversation/contact/enquiry/appointment/handoff management**: rich
+  list (filter/sort/search/paginate) and detail views for all five,
+  reusing and extending Phase 4/5's schemas and repositories.
+- **Workflow actions**: enquiry status transitions, appointment confirm/
+  decline/cancel, handoff claim (atomic) and resolve/cancel — every
+  transition validated against an explicit graph, every change recorded
+  as an `ActivityEvent`, every status-update endpoint version-checked for
+  optimistic concurrency.
+- **Internal notes**: staff-only, five-typed-FK design (never a
+  polymorphic pair), soft-deleted, author-or-admin-deletable.
+- **Activity/audit log**: append-only, tenant-isolated, paginated.
+- **Role permissions**: reused `require_tenant_role` throughout; one new
+  explicit asymmetric rule (member may resolve but not cancel a handoff).
+- **CSV export**: a reusable, injection-safe (`csv_export.py`) foundation;
+  all five entities implemented and tested on the backend; one
+  (`contacts`) wired to a dashboard button.
+- **Dashboard shell**: `DashboardShell` — nav, active-route state, tenant/
+  role identity, mobile drawer, user menu — used by 12 new pages
+  (`/dashboard` redesigned as the analytics overview, plus
+  `conversations`, `contacts`, `enquiries`, `appointments`, `handoffs`
+  each with list + `[id]` detail, plus `activity`).
+
+### No new bugs found via live testing this round
+
+Unlike every prior phase's report, this round's live browser verification
+(15 real workflow steps against a real tenant, three real users across
+owner/member roles, real widget-generated conversations/contacts/
+enquiries/appointments/handoffs) surfaced **zero broken code paths** —
+every KPI, filter, status transition, claim, note, and export worked
+correctly on first attempt. Two genuine **pre-existing gaps** (not
+regressions, not new bugs — features that simply never existed) were
+surfaced and are documented as known limitations rather than "fixed":
+
+1. **No tenant-switcher UI.** `useAuth()`'s `memberships` array can hold
+   more than one tenant, but every dashboard page always uses
+   `memberships[0]` — a user in two tenants cannot reach the second
+   through the UI. Discovered when a test user registered a throwaway
+   workspace during their own sign-up and it silently became
+   `memberships[0]`, shadowing the tenant intended for testing. Worked
+   around during verification by deleting the throwaway tenant; not
+   fixed, since building a switcher is out of scope for this phase.
+2. **No "invite a teammate" endpoint.** Adding a second/third tenant
+   member (required to test member-level permissions at all) required a
+   direct database insert into `tenant_members`. Phase 6's role
+   permissions are fully implemented and tested against members added
+   this way; only the invitation mechanism is missing.
+
+See docs/database-schema.md's and docs/api.md's Known-limitations
+sections for the complete accounting.
+
+### Verification results (all passing)
+
+- **Backend**: 421 pytest passed (up from 358), including 12 explicit
+  `pytest -m multiconn` tests (11 Phase 4 + 1 new atomic-handoff-claim
+  race test against genuinely separate database connections); Ruff clean;
+  Mypy clean (165 source files); `alembic current` at head (`4782a62b4927`),
+  `alembic check` reports no undetected model changes, full
+  upgrade → downgrade → upgrade cycle verified clean.
+- **Frontend**: 109 Vitest passed (up from 91); ESLint clean; `tsc --noEmit`
+  clean; production build succeeds (32 routes, 12 new). A subset of tests
+  showed transient timeouts under this environment's full-parallel test
+  run (a pre-existing environment characteristic, not a Phase 6
+  regression — confirmed by re-running with `--no-file-parallelism`,
+  which passed all 109 tests cleanly, and by one of the flaky tests being
+  `QualificationEditor.test.tsx`, a Phase 3 file this round never touched).
+- **Widget**: 40 Vitest passed; ESLint clean; `tsc --noEmit` clean; bundle
+  rebuilds at 27,145 bytes — byte-for-byte unchanged, since this round
+  made no widget code changes.
+
+### Migration verification
+
+`4782a62b4927` (parent `1aa533d3cabf`): `alembic upgrade head`,
+`alembic downgrade -1`, `alembic upgrade head` again, then
+`alembic check` — all clean, no drift. `server_default` values (`'1'` for
+every `version` column, `false` for every new boolean) were required and
+added by hand for every new `NOT NULL` column, since Phases 1-5 already
+have non-empty tables. The new `human_handoffs.assigned_user_id` foreign
+key was given an explicit name (`fk_human_handoffs_assigned_user_id`)
+after noticing autogenerate's `create_foreign_key(None, ...)` /
+`drop_constraint(None, ...)` pairing would have broken `downgrade()` (a
+`None` constraint name has no way to be looked up again). The six new
+`enquiry_status` enum values were added via `ALTER TYPE ... ADD VALUE`,
+matching the exact precedent `1aa533d3cabf` already established; `closed`
+(Phase 5) is left unmigrated as a legacy synonym of `archived` — no
+existing row is rewritten.
+
+### Live end-to-end verification
+
+Using the real local stack (Postgres, mock AI, real FastAPI + Next.js dev
+servers): registered a fresh tenant ("Maple Dental Care P6"), completed
+onboarding, activated a receptionist and widget installation, and
+generated real activity through the actual public widget API — a genuine
+widget conversation (with a captured contact, an appointment request, and
+a handoff request), a dashboard test-console conversation, and a
+platform-preview conversation (via the real `Origin`-based preview-origin
+check) — giving all three source classifications real data simultaneously.
+
+Confirmed live, in the browser: the overview page's KPIs matched this
+exact seeded data (1 widget / 1 preview / 1 test conversation; contact
+capture rate 100%; qualification rate 100%; 1 pending appointment; 1 open
+handoff); toggling "include test & preview traffic" correctly changed
+`total_conversations` from 1 to 3 and `unique_visitor_sessions` from 1 to
+2; the date-range/receptionist filters worked; the conversation list
+showed correct, distinctly-colored source badges; the conversation detail
+page showed the full transcript with role labels, one citation, read-only
+tool activity, linked contact/enquiry/appointment/handoff, and no
+system-prompt/token/secret text anywhere; adding an internal note
+persisted and displayed correctly with a delete control (author-only);
+updating an enquiry's status from `new` to `qualified` succeeded and
+appeared immediately; confirming a pending appointment succeeded and the
+available next actions correctly narrowed to `cancelled` only; claiming
+then resolving a handoff succeeded end-to-end; the activity feed showed
+all five of the above actions, in order, with correct old→new pairs.
+
+Logged in as a second, member-role user (added via direct database
+insert — see "known gaps" above) and confirmed: the overview and list
+pages render the same real data; the appointment detail page correctly
+hid all status-change buttons and showed "Only an owner or admin can
+confirm, decline, or cancel an appointment"; the contacts page correctly
+showed full contact PII (by policy — see docs/security.md) with no
+"Export CSV" button (member role). Logged back in as the owner and
+confirmed the CSV export of contacts, fetched directly, correctly escaped
+both a deliberately formula-shaped contact name (`=cmd|calc` →
+`'=cmd|calc`) and an ordinary phone number starting with `+`
+(`+15551234567` → `'+15551234567`, the same escaping applying correctly
+to a real, non-malicious value that happens to share the vulnerable
+prefix).
+
+The atomic two-user handoff-claim race was verified via
+`tests/integration/test_handoff_claim_concurrency.py` against genuinely
+separate database connections (not the live-browser single-session flow
+above), per the same rationale Phase 4's multiconn suite was built on.
+
+After the live session: `pg_stat_activity` showed no idle-in-transaction
+connections and no non-idle transactions from application code;
+`pg_locks` showed zero ungranted locks. Test data (tenant "Maple Dental
+Care P6", its cascaded records, and both test users) was deleted in a
+verified `ai_receptionist_dev`-scoped, committed transaction after
+re-confirming the database name; the four pre-existing Phase 1-5 tenants
+were confirmed untouched both before and after.
+
+### Known limitations (Phase 6)
+
+See docs/database-schema.md's "Known limitations (Phase 6)" for the
+complete, detailed list (no tenant-switcher UI, no invite endpoint, the
+dashboard shell not retrofitted onto existing settings/test/widget pages,
+only one of five export buttons wired into the UI) and
+docs/architecture.md's "Analytics performance" note for the documented
+future pre-aggregation boundary.
+
+### Proposed Phase 6 commit message
+
+```
+Add client operations dashboard: analytics, workflow management, and permissions (Phase 6)
+
+Implement tenant-scoped analytics (conversation/contact/enquiry/
+appointment/handoff KPIs, each with a documented numerator/denominator,
+tenant-timezone date boundaries, and test/preview traffic excluded by
+default via a server-verified signal) computed entirely through explicit
+SQL aggregates — no cache, no background job, no new external service.
+
+Add a full conversation/contact/enquiry/appointment/handoff management
+surface: filterable/sortable/searchable list and detail views, validated
+status-transition graphs, optimistic-concurrency version checks, and an
+atomic single-statement handoff claim verified safe against genuinely
+separate database connections (tests/integration/
+test_handoff_claim_concurrency.py). Add staff-only internal notes
+(five typed foreign keys, never a polymorphic pair), an append-only
+activity/audit log, and role-based permissions reusing the existing
+centralized dependency (owner/admin for appointment and handoff-cancel
+actions and CSV export; any active member for day-to-day work).
+
+Add a reusable, CSV-injection-safe export foundation and a new dashboard
+shell (nav, role display, mobile drawer) used by 12 new pages, including a
+redesigned analytics overview at /dashboard. No bugs were found via this
+round's live testing; two pre-existing UI gaps (no tenant switcher, no
+teammate-invite endpoint) were surfaced and documented rather than fixed,
+being out of this phase's scope.
+```
+
+### Phase 6 follow-up round (complete)
+
+Two of the original round's own UI gaps were closed in this round:
+
+1. **Dashboard shell now covers every authenticated route.** A single
+   `frontend/src/app/dashboard/layout.tsx` now wraps all of `/dashboard/*`
+   in `DashboardShell` (nav, role display, mobile drawer) — including the
+   settings pages, the private test console, and widget installation
+   management, which previously rendered their own separate chrome.
+   Next.js applies a layout once per navigation within a route segment,
+   not once per page, so this is exactly one shell instance, never
+   nested or duplicated — locked in by
+   `DashboardShell.test.tsx`'s `"renders a representative OLD-style page
+   (SettingsShell) inside exactly one shell"` case.
+2. **All five CSV export buttons wired into the UI**, not just contacts:
+   `ExportButton` is now used on the conversations, contacts, enquiries,
+   appointments, and handoffs list pages, each applying that page's
+   active filters (date range, status, source) to the exported file.
+
+No new backend logic changed in this round beyond what the export-button
+wiring required; `backend/app/api/v1/exports.py`,
+`backend/app/core/csv_export.py`, and `backend/app/services/export_service.py`
+already existed and were already tested from the original round.
+
+#### Verification results (follow-up round, all passing)
+
+- **Backend**: 425 pytest passed (up from 421); Ruff clean; Mypy clean
+  (165 source files); `alembic current` at head (`4782a62b4927`),
+  `alembic check` reports no undetected model changes (this round made no
+  schema changes). The 12 `pytest -m multiconn` tests were also run
+  explicitly and separately (`pytest -m multiconn`): 12 passed, 413
+  deselected.
+- **Frontend**: 132 Vitest passed across 20 files (up from 109), run with
+  the normal `vitest run` command — no `--no-file-parallelism` needed;
+  the prior round's transient full-parallel timeouts did not reproduce.
+  ESLint clean; `tsc --noEmit` clean; production build succeeds (32
+  routes, unchanged route count from the original round — this round
+  added export buttons to existing pages, no new routes).
+- **Widget**: 40 Vitest passed across 4 files; ESLint clean; `tsc --noEmit`
+  clean; `tsc -p tsconfig.json` (build) and the esbuild bundle
+  (`npm run bundle`) both succeeded — this round made no widget code
+  changes.
+
+#### Live end-to-end verification (follow-up round)
+
+Using the real local stack against a dedicated tenant ("Phase6 Verify
+Workspace") and two dedicated users (`p6verify-owner@example.com`, owner
+role; `p6verify-member@example.com`, member role):
+
+- All five owner-role CSV exports (conversations, enquiries,
+  appointments, handoffs, contacts) were fetched live and returned
+  correctly filtered, correctly formatted CSV.
+- All five export endpoints were confirmed to reject the member-role
+  user with `403 Forbidden` (the same `require_tenant_role(ADMIN)`
+  dependency `exports.py` already used).
+- CSV-injection protection was verified against real, live-fetched
+  export output, not a unit test in isolation: a deliberately
+  formula-shaped value (`=cmd|calc`) and an ordinary phone number
+  sharing the same vulnerable leading character (`+14155551234`) both
+  exported with a protective leading apostrophe, applying identically to
+  a genuinely malicious value and an ordinary one that happens to share
+  its prefix.
+- Dashboard analytics and entity list/detail data were confirmed to
+  render correctly against this tenant's real seeded data.
+- The activity feed (`GET /tenants/{tenant_id}/activity`) recorded all
+  five `export.downloaded` events, one per entity, each with the correct
+  `entity`/`date_from`/`date_to` metadata.
+- `pg_stat_activity` showed zero `idle in transaction` sessions and
+  `pg_locks` showed zero ungranted locks after the session (the five
+  idle pooled connections observed belong to the still-running local
+  `uvicorn` dev server's connection pool, not a leak).
+- Exact query counts, captured via `tests/test_dashboard_performance.py`'s
+  existing `count_queries` SQLAlchemy event hook (temporarily instrumented
+  with a print statement for this measurement, then reverted — the
+  committed test file only asserts the existing `< 20` / `< 10` / `< 10`
+  bounds, not exact values): analytics overview **11 queries**,
+  conversation list **5 queries**, enquiry list **5 queries** — all well
+  within bounds and flat regardless of seeded row count (40 seeded
+  conversations with their full fan-out of messages/contacts/enquiries/
+  appointments/handoffs).
+
+#### Test data cleanup — not yet completed
+
+The tenant "Phase6 Verify Workspace" (`c8e113df-4937-4f64-9310-5f1437c256d2`)
+and its two users (`p6verify-owner@example.com`,
+`p6verify-member@example.com`) created for this round's live verification
+were identified and confirmed to be scoped to `ai_receptionist_dev`, with
+every tenant-scoped table's `tenant_id` foreign key set to `ON DELETE
+CASCADE` (confirmed via `information_schema`), but the delete itself was
+blocked by this environment's automated safety check on permanent data
+deletion and was not performed. The four pre-existing Phase 1-5 tenants
+were confirmed untouched. To complete cleanup, run, against
+`ai_receptionist_dev` only:
+
+```sql
+BEGIN;
+DELETE FROM tenants WHERE id = 'c8e113df-4937-4f64-9310-5f1437c256d2';
+DELETE FROM users WHERE id IN (
+  'abbe0ec8-839d-4aa9-8ace-99eb0576ecd9',
+  '218eaf89-2f93-4bbf-b7dc-ba9c05fc2868'
+);
+COMMIT;
+```
+
+### Revised Phase 6 commit message
+
+Nothing has been committed yet, so this supersedes the earlier draft above
+with one message covering the full, still-uncommitted Phase 6 changeset —
+original build plus the follow-up round.
+
+```
+Add client operations dashboard: analytics, workflow management, and permissions (Phase 6)
+
+Implement tenant-scoped analytics (conversation/contact/enquiry/
+appointment/handoff KPIs, each with a documented numerator/denominator,
+tenant-timezone date boundaries, and test/preview traffic excluded by
+default via a server-verified signal) computed entirely through explicit
+SQL aggregates — no cache, no background job, no new external service.
+
+Add a full conversation/contact/enquiry/appointment/handoff management
+surface: filterable/sortable/searchable list and detail views, validated
+status-transition graphs, optimistic-concurrency version checks, and an
+atomic single-statement handoff claim verified safe against genuinely
+separate database connections (tests/integration/
+test_handoff_claim_concurrency.py). Add staff-only internal notes
+(five typed foreign keys, never a polymorphic pair), an append-only
+activity/audit log, and role-based permissions reusing the existing
+centralized dependency (owner/admin for appointment and handoff-cancel
+actions and CSV export; any active member for day-to-day work).
+
+Add a reusable, CSV-injection-safe export foundation, wired into all five
+entity list pages (conversations, contacts, enquiries, appointments,
+handoffs), and a new dashboard shell (nav, role display, mobile drawer)
+now covering every authenticated route via a single root layout, used by
+12 new pages including a redesigned analytics overview at /dashboard.
+
+No bugs were found via this phase's live testing, across either round;
+two pre-existing UI gaps (no tenant switcher, no teammate-invite
+endpoint) were surfaced and documented rather than fixed, being out of
+this phase's scope. See docs/PROGRESS.md for the full accounting of both
+rounds' verification results.
+```
+
+**Awaiting explicit review and commit approval. Phase 7 has not been
 started.**

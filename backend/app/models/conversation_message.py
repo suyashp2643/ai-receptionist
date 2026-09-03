@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, func, text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func, text
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
@@ -65,6 +65,12 @@ class ConversationMessage(UUIDPrimaryKeyMixin, Base):
 
     citations: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     safety_labels: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    # Set by the orchestrator when this ASSISTANT message's content matches
+    # one of the mock provider's known "found nothing" markers (see
+    # app/ai/providers/mock.py::FALLBACK_RESPONSE_MARKERS) — Phase 6's
+    # "unanswered / fallback responses" analytics metric. Always False for
+    # USER/TOOL/SYSTEM messages.
+    is_fallback_response: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     latency_ms: Mapped[int | None] = mapped_column(Integer)
     token_usage: Mapped[dict | None] = mapped_column(JSONB)

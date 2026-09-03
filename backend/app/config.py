@@ -128,6 +128,20 @@ class Settings(BaseSettings):
     appointment_request_retention_days: int = 180
     handoff_request_retention_days: int = 180
 
+    # --- Dashboard analytics (Phase 6) ---
+    # A rough, admittedly-arbitrary assumption behind the "estimated staff
+    # time saved" KPI: how many minutes of staff time one genuine widget
+    # conversation is assumed to replace (answering a question, taking down
+    # an enquiry, etc.). This has no empirical basis specific to any given
+    # tenant's business — it is a single global, configurable multiplier,
+    # always labeled "estimated" in the API/UI, never presented as a
+    # measured fact. See app/services/analytics_service.py.
+    estimated_staff_minutes_per_conversation: float = 5.0
+    # Hard ceiling on any analytics date range, to keep the overview and
+    # timeseries endpoints' aggregate queries bounded regardless of how far
+    # back a client asks — see app/services/analytics_service.py.
+    analytics_max_range_days: int = 366
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()]

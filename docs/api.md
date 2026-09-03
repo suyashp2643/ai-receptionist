@@ -550,6 +550,99 @@ conversation/contact exists. `429 Too Many Requests` includes a
 `docs/security.md` for a bug that once silently dropped this header on
 every route, not just this one.
 
+## Client operations dashboard (dashboard, authenticated) (Phase 6)
+
+All routes below are Bearer-token authenticated (no CSRF header needed —
+same pattern as every other tenant-scoped route in this API) and tenant-
+scoped via `{tenant_id}` in the path. Minimum role for every `GET` is any
+active member unless noted; see docs/security.md's permission matrix for
+the complete, authoritative table.
+
+**Analytics** — `GET .../analytics/overview`, `GET .../analytics/timeseries`.
+Query params: `preset` (`today`|`7d`|`30d`|`custom`, default `30d`),
+`custom_start`/`custom_end` (ISO dates, required together when
+`preset=custom`), `receptionist_id` (optional filter), `include_test_preview`
+(bool, default `false`). `422` for an invalid preset, a missing custom
+bound, an end before a start, a range exceeding
+`Settings.analytics_max_range_days` (366), or an unrecognized tenant
+timezone. See `app/services/analytics_service.py`'s module docstring for
+the exact numerator/denominator of every field in the response, and
+docs/architecture.md's "Client operations dashboard" section for the
+source-classification and estimate-labeling design.
+
+**Conversations** — `GET .../conversations` (filters: `receptionist_id`,
+repeatable `source` in `{test, preview, widget}`, repeatable `status`,
+`date_from`/`date_to`, `only_safety_events`, `qualification_complete`,
+`search` — matches a linked contact's name/email/phone or the
+`visitor_reference`; sort: `sort` in `{started_at, last_message_at}`,
+`sort_direction`; bounded `limit`/`offset`, max page size 100), `GET
+.../conversations/{id}` (full transcript with citations/tool-activity/
+qualification/safety flags/linked contact/enquiry/appointment/handoff
+records — never the system prompt, provider secrets, or a capability
+token/hash).
+
+**Contacts** — `GET .../contacts` (filters: `search`, `date_from`/
+`date_to`), `GET .../contacts/{id}` (full detail plus linked
+conversation/enquiry/appointment/handoff ids). List and detail expose full
+PII (name/email/phone) to any active member — see docs/security.md for why
+this is a deliberate policy, not an oversight.
+
+**Enquiries** — `GET .../enquiries` (filters: `receptionist_id`, repeatable
+`status`, `date_from`/`date_to`, `search`), `GET .../enquiries/{id}`,
+`PATCH .../enquiries/{id}/status` — body `{"status": "...",
+"expected_version": <int>}`. `422` for an invalid transition (see
+docs/security.md's status-transition rules), `409` if `expected_version`
+no longer matches the row's current `version` (someone else wrote first —
+reload and retry, never a silent overwrite).
+
+**Appointments** — `GET .../appointments` (filters: `receptionist_id`,
+repeatable `status`, `date_from`/`date_to` against the *requested*
+appointment date, `search`), `GET .../appointments/{id}`, `PATCH
+.../appointments/{id}/status` (owner/admin only) — same body shape as
+enquiries. Confirming, declining, or cancelling **never sends any message
+to the visitor** — there is no delivery mechanism in this codebase at all.
+
+**Handoffs** — `GET .../handoffs` (filters: `receptionist_id`, repeatable
+`status`, `urgency`, `date_from`/`date_to`, `search`), `GET
+.../handoffs/{id}` (includes `is_clinic_emergency`, computed from the
+linked conversation's `had_clinic_emergency` flag — a clinic-emergency
+handoff is never presented as an ordinary one), `POST
+.../handoffs/{id}/claim` (any active member; atomic — see
+docs/architecture.md — `409` if it's no longer open), `PATCH
+.../handoffs/{id}/status` (`resolved`: any active member; `cancelled`:
+admin/owner only; `claimed` is rejected here with a `422` pointing at the
+claim endpoint instead).
+
+**Internal notes** — `GET .../notes?entity_type=...&entity_id=...`, `POST
+.../notes` (body: `entity_type` in `{conversation, contact, enquiry,
+appointment_request, human_handoff}`, `entity_id`, `body`; `404` if the
+entity doesn't exist for this tenant — including one that exists for a
+*different* tenant, indistinguishable from "doesn't exist"), `PATCH
+.../notes/{id}` (author only, `403` otherwise), `DELETE .../notes/{id}`
+(author or admin/owner, `403` otherwise). Never returned to, or read by,
+any public-widget route or the AI orchestrator.
+
+**Activity** — `GET .../activity` (filters: `entity_type`, `entity_id`;
+bounded `limit`/`offset`) — read-only; there is no write route, since
+every event is written internally by the service that performed the
+action.
+
+**Exports** — `GET .../exports/{entity}` where `entity` is one of
+`conversations` (metadata only — no message content), `contacts`,
+`enquiries`, `appointments`, `handoffs`. Owner/admin only. Required
+`date_from`/`date_to` query params, capped at 366 days; optional
+repeatable `status` (enquiries/handoffs/appointments) and `source`
+(conversations) filters, validated against the same enums the list
+endpoints use — an unrecognized value is rejected with 422
+(`InvalidExportFilterError`). For `appointments`, `date_from`/`date_to`
+filter on `requested_date` (the appointment's own date), matching exactly
+what the appointments list page shows; every other entity filters on
+`created_at`. Returns `text/csv; charset=utf-8` with a
+`Content-Disposition: attachment` header. All five entities are wired to
+an "Export CSV" button in the dashboard UI (owner/admin only; members do
+not see the control). See docs/security.md's "Export security" section
+for the CSV-injection protection and row-count bound.
+
 ## Error shape
 
 Every error response (from `app/core/errors.py`) has the same shape:
@@ -559,14 +652,14 @@ Every error response (from `app/core/errors.py`) has the same shape:
 (422 validation errors additionally include `"details": [...]` — the
 Pydantic error list, safely JSON-encoded via `jsonable_encoder`.)
 
-## Not implemented in Phase 5
+## Not implemented in Phase 5/6
 
-Production analytics dashboards, billing/subscriptions, actual telephone
-calls, Twilio, WhatsApp/SMS, live calendar booking (appointment requests are
-always `pending`, never auto-confirmed — structured service/location
-*selection* is implemented, but selecting one is never a real availability
-check), sending real email, CRM synchronization, Revenue Brain / AI Sales
-Employee integration, paid AI provider usage by default, an automated data-
+Billing/subscriptions, actual telephone calls, Twilio, WhatsApp/SMS, live
+calendar booking (appointment requests are always `pending` until a human
+explicitly confirms them — structured service/location *selection* is
+implemented, but selecting one is never a real availability check), sending
+real email, CRM synchronization, Revenue Brain / AI Sales Employee
+integration, paid AI provider usage by default, an automated data-
 retention/deletion job (defaults are declared and configurable; nothing
 executes them yet — see `docs/security.md`), and any public marketing site
 or Phase 7 industry-demo landing pages — all later, explicitly-approved
@@ -574,3 +667,15 @@ phases. A real (non-mock) provider's HTTP calls, embeddings, website
 crawling, document parsing, and server-side voice processing are likewise
 still out of scope; browser-native voice (Web Speech API) is implemented in
 the widget bundle only, with no server-side counterpart.
+
+Phase 6 specifically does not include: a tenant-switcher UI (a user
+belonging to more than one tenant can only reach the first one in their
+membership list — see docs/database-schema.md's Known limitations), an
+"invite a teammate" endpoint (adding a second/third member requires a
+direct database insert today), and any background job that
+pre-aggregates analytics (every number is computed live, on request —
+see "Analytics performance" note in docs/architecture.md for the
+measured query counts/timings and when pre-aggregation would need to be
+added). The dashboard shell now covers every authenticated route, and
+all five export endpoints are wired to buttons in the dashboard UI (both
+resolved in the Phase 6 follow-up round — see docs/PROGRESS.md).

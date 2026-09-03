@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Boolean, ForeignKey, ForeignKeyConstraint, String
+from sqlalchemy import Boolean, ForeignKey, ForeignKeyConstraint, Integer, String
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
@@ -52,6 +52,14 @@ class Enquiry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     qualification_data: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     qualification_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     recommended_next_action: Mapped[str | None] = mapped_column(String(50))
+
+    # Optimistic concurrency for Phase 6's status-update endpoint — a PATCH
+    # must supply the version it read; a mismatch means someone else wrote
+    # first (see app/services/enquiry_service.py). Every status change is
+    # additionally recorded as an ActivityEvent, which is the actual status
+    # *history* — this column exists only to prevent silent overwrites, not
+    # to reconstruct history.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
     def __repr__(self) -> str:
         return f"Enquiry(id={self.id!r}, tenant_id={self.tenant_id!r}, status={self.status!r})"

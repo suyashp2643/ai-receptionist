@@ -155,6 +155,15 @@ class GenerateResult(BaseModel):
     finish_reason: ProviderFinishReason
     usage: ProviderUsage | None = None
     provider_message_id: str | None = None
+    # Part of the provider-independent contract, not mock-specific: any
+    # provider MAY set this to signal "I found nothing to answer this
+    # with," for Phase 6's "unanswered / fallback responses" analytics
+    # metric (app/services/analytics_service.py). Only MockProvider
+    # currently sets it meaningfully (from its own known "found nothing"
+    # response text) — a real LLM provider would need its own logic to set
+    # this truthfully, and until one does, the metric is mock-only. See
+    # docs/architecture.md's Phase 6 analytics section.
+    is_fallback: bool = False
 
 
 class StreamChunk(BaseModel):
@@ -163,6 +172,7 @@ class StreamChunk(BaseModel):
     finish_reason: ProviderFinishReason | None = None
     usage: ProviderUsage | None = None
     provider_message_id: str | None = None
+    is_fallback: bool = False
 
 
 class ProviderError(Exception):
