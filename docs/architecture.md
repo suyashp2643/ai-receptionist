@@ -943,4 +943,111 @@ directly — so its 7 existing consumer pages needed zero code changes.
 The private test console and widget-management pages were rewritten to
 read `useDashboardContext()` directly and dropped their own
 auth-loading/redirect/back-link boilerplate, since the layout now
-supplies all of it once.
+supplies all of it once. (Phase 7 later moved this file to
+`frontend/src/app/(app)/dashboard/settings/SettingsShell.tsx` — see
+below; the component itself was untouched by that move.)
+
+## Public marketing website & interactive demos (implemented — Phase 7)
+
+### Two route groups, not one layout with conditionals
+
+`frontend/src/app/` now has two Next.js route groups sitting side by side:
+`(marketing)` (16 public routes) and `(app)` (`login`, `register`,
+`onboarding`, `dashboard` — everything Phase 2-6 already built, moved
+here unchanged). The root layout (`frontend/src/app/layout.tsx`) no
+longer wraps anything in `<AuthProvider>`; that now lives entirely in
+`frontend/src/app/(app)/layout.tsx`. This was not a stylistic choice —
+Phase 7's live testing found the root layout firing an unconditional
+`auth/refresh` call (and a correctly-rejected `403`, since no dashboard
+session exists) on every public page load, violating both "no
+unnecessary backend calls on a static page" and "the public site never
+receives a dashboard cookie." A route-group split, not a conditional
+inside a shared layout, was the fix, because Next.js route groups don't
+add a URL segment — `(marketing)/page.tsx` still serves `/`, and
+`(app)/dashboard/page.tsx` still serves `/dashboard` — so no existing URL
+changed. `frontend/src/app/(marketing)/layout.tsx` wraps every public
+route in a skip-link, the shared `Header`/`Footer`, and nothing else —
+no auth, no dashboard context, no widget/auth module import anywhere in
+its dependency tree.
+
+### Centralized configuration, not scattered literals
+
+Four small modules under `frontend/src/lib/` are the single source of
+truth for everything a future rebrand/re-pricing/re-domain would touch:
+`brand.ts` (product name, tagline, description, support email, CTA
+labels — the final brand name has not been chosen, so every page reads
+`brand.productName` rather than a hardcoded string), `pricing.ts` (three
+plans, every price explicitly flagged `isPlaceholder: true`; `Scale` uses
+`monthlyPriceUsd: null` → "Contact us" rather than a speculative number),
+`demos.ts` (the three demo tenants' `publicId`/business name/suggested
+questions/safety note — the single place a demo's `publicId` must match
+the backend seed), and `seo.ts` (`getSiteUrl()` reads
+`NEXT_PUBLIC_SITE_URL`, defaulting safely to `http://localhost:3000`;
+`buildMetadata()`/`organizationJsonLd()`/`faqJsonLd()`/
+`breadcrumbJsonLd()` are the only place canonical URLs and structured
+data are constructed).
+
+### Demo tenants: real rows, not a parallel demo system
+
+The three interactive demos (`/demo/clinic`, `/demo/hotel`,
+`/demo/real-estate`) are not a separate mock subsystem — each is a real
+`Tenant` row with a real, industry-templated `Receptionist` and a real
+`ACTIVE` `WidgetInstallation`, seeded by
+`backend/app/seed_data/public_demo_tenants.py` (idempotent, keyed on a
+fixed `slug`) and reusing `onboarding_service.select_industry()` /
+`apply_template_defaults()` exactly as a real tenant's onboarding flow
+does — so qualification fields, suggested questions, and safety rules are
+all industry-template-derived, not hand-authored per demo. The one
+deliberate departure from `app/seed_data/demo_tenants.py` (Phase 3's
+internal, login-based dashboard-exploration demos): these three tenants
+have **no `User` and no `TenantMember` row at all**, because the public
+widget API (Phase 5) never required a dashboard login in the first
+place — "if demo users are unnecessary, do not create them." Each
+`WidgetInstallation.public_id` is a fixed, memorable string
+(`demo-clinic-sunrise`, `demo-hotel-azurebay`, `demo-realestate-falcon`)
+rather than the usual random `secrets.token_urlsafe(24)` — safe because
+`public_id` was never a secret by design (see its docstring), and a
+fixed value is what lets `frontend/src/lib/demos.ts` reference it
+directly without a runtime lookup.
+
+### Reusing, not reimplementing, Phase 5's live-preview mechanism
+
+`frontend/public/demo-widget.html` is `widget-preview.html` (Phase 5's
+dashboard live-preview page) adapted for public use: same
+query-param-driven config (`publicId`/`apiBaseUrl`/`bundleUrl`/
+`sessionNamespace`), same sandboxed-iframe embedding
+(`allow-scripts allow-same-origin allow-forms`), same trust path (served
+from the marketing site's own origin, already a trusted
+`platform_preview_origins` entry), same zero-dependency static page with
+no import of any dashboard/auth code. The only difference is the visible
+banner text and `data-visitor-reference` value
+(`"public-demo"` vs. `"dashboard-preview"`) — the classification that
+excludes this traffic from tenant analytics (`is_platform_preview`, see
+Phase 6 above) depends only on the `Origin` header, not on this label,
+so demo traffic is excluded from "production" analytics with zero new
+backend code. `DemoWidgetEmbed`
+(`frontend/src/components/marketing/DemoWidgetEmbed.tsx`) is the React
+wrapper: it generates `sessionNamespace` inside a `useEffect` — never
+during the initial render, which Next.js also executes server-side for a
+Client Component, where a `crypto.randomUUID()` call would produce a
+different value than the client's own hydration pass and trigger a
+hydration-mismatch error (found via live testing; see docs/PROGRESS.md)
+— and remounts the iframe under a new React `key` on "Restart demo,"
+which is what actually starts a genuinely new, isolated conversation
+rather than merely clearing the visible transcript.
+
+### Public leads: a global model, deliberately not a synthetic tenant
+
+`PublicLead` (`app/models/public_lead.py`) follows the one existing
+precedent for platform-level (not customer-owned) data,
+`IndustryTemplate`: a plain model with no `tenant_id` column at all. The
+alternative — inventing a "platform tenant" so the existing
+`TenantContext`/`require_tenant_role` machinery could be reused — was
+rejected because a lead is not yet a customer, and forcing one into a
+tenant row would be a worse data model for a problem `IndustryTemplate`
+already solved correctly. The endpoint
+(`app/api/v1/public_leads.py`) is intentionally the simplest possible
+shape: one `POST`, no `GET`, reusing Phase 3's plain-text validation
+policy and a new IP-only-keyed variant of the existing
+`app/core/rate_limit.py` dependency (the widget's version keys on an
+installation, which doesn't exist for this route).

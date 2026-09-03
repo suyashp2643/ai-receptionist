@@ -1,4 +1,4 @@
-from app.ai.tools.base import ToolContext, execute_tool
+from app.ai.tools.base import ToolContext, _bound_output, execute_tool
 from app.ai.tools.registry import PHASE_4_TOOL_NAMES, TOOL_REGISTRY
 from app.models.business_location import BusinessLocation
 from app.models.service import Service
@@ -13,6 +13,36 @@ def _context(tenant_id) -> ToolContext:
     import uuid
 
     return ToolContext(tenant_id=tenant_id, receptionist_id=uuid.uuid4())
+
+
+class TestBoundOutputDepth:
+    """_bound_output is the shared defense-in-depth truncation every tool
+    output passes through — see its docstring for the Phase 7
+    "None-None business hours" bug this locks in the fix for."""
+
+    def test_the_business_hours_shape_depth_survives(self):
+        # dict(0) -> days list(1) -> day dict(2) -> intervals list(3) ->
+        # interval dict(4) -> "08:00" string(5) — exactly the real shape.
+        value = {"days": [{"intervals": [{"start": "08:00", "end": "17:00"}]}]}
+        bounded = _bound_output(value)
+        assert bounded["days"][0]["intervals"][0]["start"] == "08:00"
+        assert bounded["days"][0]["intervals"][0]["end"] == "17:00"
+
+    def test_a_pathologically_deep_structure_is_still_bounded(self):
+        value: dict = {"a": "leaf"}
+        for _ in range(20):
+            value = {"a": value}
+        bounded = _bound_output(value)
+
+        def _depth(v: object) -> int:
+            d = 0
+            while isinstance(v, dict) and "a" in v:
+                v = v["a"]
+                d += 1
+            return d
+
+        # Truncated well before 20 levels, and never raises.
+        assert _depth(bounded) < 20
 
 
 class TestToolGating:
@@ -104,8 +134,13 @@ class TestListServicesTool:
         db_session.flush()
 
         result = execute_tool(
-            TOOL_REGISTRY, call_id="c1", name="list_services", arguments={}, allowed_names=PHASE_4_TOOL_NAMES,
-            db=db_session, context=_context(tenant.id),
+            TOOL_REGISTRY,
+            call_id="c1",
+            name="list_services",
+            arguments={},
+            allowed_names=PHASE_4_TOOL_NAMES,
+            db=db_session,
+            context=_context(tenant.id),
         )
         names = [s["name"] for s in result.output["services"]]
         assert "Haircut" in names
@@ -119,8 +154,13 @@ class TestListServicesTool:
         db_session.flush()
 
         result = execute_tool(
-            TOOL_REGISTRY, call_id="c1", name="list_services", arguments={}, allowed_names=PHASE_4_TOOL_NAMES,
-            db=db_session, context=_context(tenant_a.id),
+            TOOL_REGISTRY,
+            call_id="c1",
+            name="list_services",
+            arguments={},
+            allowed_names=PHASE_4_TOOL_NAMES,
+            db=db_session,
+            context=_context(tenant_a.id),
         )
         names = [s["name"] for s in result.output["services"]]
         assert "B's Secret Service" not in names
@@ -139,17 +179,59 @@ class TestGetBusinessHoursTool:
         db_session.flush()
 
         result = execute_tool(
-            TOOL_REGISTRY, call_id="c1", name="get_business_hours", arguments={}, allowed_names=PHASE_4_TOOL_NAMES,
-            db=db_session, context=_context(tenant.id),
+            TOOL_REGISTRY,
+            call_id="c1",
+            name="get_business_hours",
+            arguments={},
+            allowed_names=PHASE_4_TOOL_NAMES,
+            db=db_session,
+            context=_context(tenant.id),
         )
         assert result.status == "ok"
         assert result.output["days"][0]["day_name"] == "Monday"
 
+    def test_interval_start_and_end_survive_bounded_output(self, db_session: Session):
+        """Regression test for a Phase 7 bug found via live testing of the
+        public demos: _bound_output's recursion-depth cutoff silently
+        replaced every real start/end time with None, producing a
+        "None-None" hours response with no error anywhere in the pipeline
+        (this exact call still returns status "ok"). See
+        app/ai/tools/base.py's _bound_output docstring for the full
+        depth-by-depth trace."""
+        tenant, _, _ = make_tenant_with_owner(db_session)
+        repo = BusinessLocationRepository(db_session, tenant.id)
+        hours = {"days": [{"day_of_week": 0, "closed": False, "intervals": [{"start": "08:00", "end": "17:00"}]}]}
+        repo.add(
+            BusinessLocation(
+                tenant_id=tenant.id, name="Main Office", is_primary=True, is_active=True, working_hours=hours
+            )
+        )
+        db_session.flush()
+
+        result = execute_tool(
+            TOOL_REGISTRY,
+            call_id="c1",
+            name="get_business_hours",
+            arguments={},
+            allowed_names=PHASE_4_TOOL_NAMES,
+            db=db_session,
+            context=_context(tenant.id),
+        )
+        assert result.status == "ok"
+        interval = result.output["days"][0]["intervals"][0]
+        assert interval["start"] == "08:00"
+        assert interval["end"] == "17:00"
+
     def test_no_locations_returns_empty_days_not_an_error(self, db_session: Session):
         tenant, _, _ = make_tenant_with_owner(db_session)
         result = execute_tool(
-            TOOL_REGISTRY, call_id="c1", name="get_business_hours", arguments={}, allowed_names=PHASE_4_TOOL_NAMES,
-            db=db_session, context=_context(tenant.id),
+            TOOL_REGISTRY,
+            call_id="c1",
+            name="get_business_hours",
+            arguments={},
+            allowed_names=PHASE_4_TOOL_NAMES,
+            db=db_session,
+            context=_context(tenant.id),
         )
         assert result.status == "ok"
         assert result.output["days"] == []

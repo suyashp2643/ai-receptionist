@@ -14,6 +14,7 @@ from app.models.human_handoff import HumanHandoff
 from app.models.industry_template import IndustryTemplate
 from app.models.internal_note import InternalNote
 from app.models.knowledge import KnowledgeChunk, KnowledgeDocument, KnowledgeSource
+from app.models.public_lead import PublicLead
 from app.models.receptionist import Receptionist
 from app.models.receptionist_workflow import ReceptionistWorkflow
 from app.models.refresh_token import RefreshToken
@@ -50,4 +51,5 @@ __all__ = [
     "HumanHandoff",
     "InternalNote",
     "ActivityEvent",
+    "PublicLead",
 ]

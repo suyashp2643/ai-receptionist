@@ -894,3 +894,120 @@ metadata: which entity, date range, and (when supplied) the `status`/
 `source` filter applied — never the exported rows themselves). No secrets, capability tokens, token hashes, or system-prompt
 text are ever exportable, since none of those fields exist on any exported
 model in the first place.
+
+## Public marketing website threat model (Phase 7)
+
+The `(marketing)` route group (see docs/architecture.md) is architecturally
+isolated from the dashboard's authentication system — `AuthProvider` is
+mounted only inside the new `(app)` route group (`login`/`register`/
+`onboarding`/`dashboard`), never at the root layout. Verified live: no
+`auth/refresh` call fires on any public page, and `document.cookie` on a
+`/demo/*` page contains no dashboard refresh or CSRF cookie. A marketing
+page therefore has no code path that could read or forward a dashboard
+credential even if it wanted to.
+
+**The three interactive demos** embed the real, unmodified public widget
+bundle inside a sandboxed iframe (`allow-scripts allow-same-origin
+allow-forms` — no `allow-top-navigation`, no `allow-popups`) pointed at
+`frontend/public/demo-widget.html`, a static, dependency-free page with
+no import of the dashboard's `lib/api.ts` or any auth module — modeled
+directly on Phase 5's `widget-preview.html` and carrying the identical
+security properties documented under "Public widget threat model
+(Phase 5)" above: the widget authenticates only via a per-conversation
+capability token (`X-Widget-Session-Token`), never a cookie; `public_id`
+is not a secret; the demo page is trusted by the backend's
+`validate_widget_origin` check via the existing
+`Settings.platform_preview_origins` allow-list (the marketing site's own
+origin), never merged into any tenant's `allowed_domains`. Each of the
+three demos targets a **separate fictional tenant** (see
+docs/database-schema.md's Phase 7 tables), so cross-demo data leakage
+would require the same tenant-isolation failure that would compromise
+any two real customer tenants — there is no demo-specific isolation
+mechanism to audit separately. `DemoWidgetEmbed` generates a fresh,
+client-only `sessionNamespace` per mount (never during SSR — see
+docs/PROGRESS.md's hydration-bug writeup) and on every "Restart demo"
+click, remounting the iframe under a new React `key`; verified live that
+restarting genuinely starts a new conversation with no prior message
+surviving, and confirmed by an automated test that two simultaneously
+rendered demo instances never share a namespace.
+
+**Demo capability tokens** are the same short-lived,
+single-conversation-scoped, revocable tokens Phase 5 already threat-
+modeled — nothing about being embedded in a public demo page changes
+their lifetime, scope, or transferability. They are never present in any
+page's initial HTML (only inside the iframe's own runtime-fetched
+response) and are not logged by the marketing site, which has no code
+path that ever sees them.
+
+**Demo traffic is excluded from tenant analytics by the existing,
+already-reviewed classification mechanism** — `is_platform_preview` is
+derived server-side from the `Origin` header at session-creation time
+against `platform_preview_origins_list`, never from a client-supplied
+flag (see "Source classification is server-verified" under Phase 6
+above). `demo-widget.html` sets `data-visitor-reference="public-demo"`
+(distinct from the dashboard preview's `"dashboard-preview"`, for
+operator legibility only — this label plays no role in the
+classification itself) and is served from the marketing site's own
+origin, which is already a trusted platform-preview origin, so demo
+conversations resolve to `preview`, not `widget`, and are excluded from
+"production" analytics by default without any Phase 7-specific code.
+
+**The public lead-capture endpoint** (`POST /api/v1/public/leads` — see
+docs/api.md) is deliberately minimal:
+- Every field is validated server-side regardless of client input,
+  reusing Phase 3's plain-text policy (`app/core/text_safety.py`: any
+  `<`/`>` rejected outright — the same "don't attempt HTML sanitization,
+  just refuse markup" policy already applied to every tenant-authored
+  text field) plus `EmailStr` for the email and explicit per-field
+  length caps.
+- A honeypot field (`hp_field`), hidden via CSS and removed from the tab
+  order (`tabindex="-1"`, never `display:none` alone, since some spam
+  tooling specifically skips `display:none` fields), causes silent
+  drop-without-persist — but **still consumes rate-limit budget**, so a
+  bot cannot use the honeypot as a free bypass of the limiter, and the
+  response is byte-identical to a real save so a caller can never probe
+  for which behavior occurred.
+- Rate limited to 5/hour per hashed client IP via a new IP-only-keyed
+  dependency built on the existing `app/core/rate_limit.py`
+  `InMemoryRateLimiter` — same single-process caveat already documented
+  for the widget's rate limiting above (real capacity scales with worker
+  count; a Redis-backed implementation of the same `RateLimiter`
+  Protocol is the intended upgrade path).
+- **No public or authenticated read endpoint exists for leads at all** —
+  the only method registered on `/api/v1/public/leads` is `POST`. This
+  was a deliberate choice: building a scoped internal-admin read surface
+  (with its own authentication and authorization model) was judged out
+  of this phase's scope, and exposing leads through any existing
+  tenant-scoped or dashboard-authenticated endpoint would have meant
+  either forcing every lead into a synthetic "platform tenant" (a worse
+  data model — see docs/database-schema.md) or building a new,
+  under-reviewed global-read permission entirely. An operator retrieves
+  leads via a direct local database query — see
+  docs/local-development.md.
+- User-provided fields are rendered as plain React text content
+  everywhere they might ever be displayed (there is currently no UI that
+  displays a lead at all) — no `dangerouslySetInnerHTML` is used for any
+  user-controlled value anywhere in the Phase 7 codebase; the only
+  `dangerouslySetInnerHTML` calls in this phase are for static,
+  server-authored JSON-LD (`JSON.stringify` of a fixed object — never
+  user input) on the homepage, industry pages, and pricing page.
+- Consent is stored as two independent booleans (`contact_consent`,
+  `marketing_consent`) — the form requires the former to submit at all
+  and never implies the latter from it.
+
+**No open redirect**: every internal link in the marketing site is a
+static, hardcoded Next.js `<Link href="...">` to a known internal path —
+there is no user-controlled redirect target anywhere in Phase 7.
+
+**No sensitive data in metadata, HTML source, or logs**: page titles,
+descriptions, Open Graph tags, and JSON-LD are all static, server-authored
+strings from `brand.ts`/`pricing.ts`/`demos.ts` — never interpolated from
+request data. The canonical/OG URLs are built from `NEXT_PUBLIC_SITE_URL`
+only.
+
+**Privacy/terms pages** (`/privacy`, `/terms`) explicitly state they are
+plain-English notices, not legally reviewed policies, and claim no
+compliance certification — matching this project's existing "no
+compliance claim" posture (see "What we don't claim" under Security in
+`frontend/src/app/(marketing)/security/page.tsx`, and the equivalent
+honest-limitations framing used throughout this document).

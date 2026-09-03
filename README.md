@@ -5,12 +5,16 @@ industry templates (real estate, clinics, hotels, restaurants, automotive,
 law firms, education, home services, SaaS, custom) configure it via data,
 not forked code.
 
-Status: **Phase 6 — client operations dashboard: real analytics, conversation/
-contact/enquiry/appointment/handoff management, internal notes, an audit
-log, role-based permissions, and CSV export — on top of Phase 5's public
-embeddable website widget, browser voice, secure public conversations,
-contact capture, appointment requests, human handoff, and installation
-management**. See
+Status: **Phase 7 — a public marketing website (Next.js route group,
+centralized branding/pricing/SEO configuration) and three interactive
+industry demos (clinic, hotel, real estate) embedding the real public
+widget against dedicated fictional tenants, plus a zero-cost public
+lead-capture endpoint — on top of Phase 6's client operations dashboard:
+real analytics, conversation/contact/enquiry/appointment/handoff
+management, internal notes, an audit log, role-based permissions, and CSV
+export, itself on top of Phase 5's public embeddable website widget,
+browser voice, secure public conversations, contact capture, appointment
+requests, human handoff, and installation management**. See
 [docs/PROGRESS.md](docs/PROGRESS.md) for what's implemented so far,
 [docs/architecture.md](docs/architecture.md) for the system design, and
 [docs/security.md](docs/security.md) for the auth/tenant-isolation/public-widget
@@ -39,10 +43,22 @@ threat model.
   staff-only internal notes, an append-only activity/audit log, and
   owner/admin-only CSV export — all on the existing Postgres database and
   mock AI provider, no new external service
-- Zero-cost by design through Phase 6: no paid APIs, no external embeddings,
-  no telephony/SMS/email providers — deterministic local chunking +
-  PostgreSQL full-text search for knowledge, deterministic mock AI provider,
-  browser-native (not server-side) voice
+- Public marketing website & demos (Phase 7): a `(marketing)` Next.js route
+  group (`/`, `/product`, `/industries/*`, `/demo/*`, `/pricing`,
+  `/security`, `/about`, `/contact`, `/privacy`, `/terms`) that never wraps
+  in the dashboard's `AuthProvider` and never receives a dashboard cookie;
+  centralized branding/pricing/demo/SEO config modules
+  (`frontend/src/lib/{brand,pricing,demos,seo}.ts`); three fictional,
+  user-less demo tenants (`backend/app/seed_data/public_demo_tenants.py`)
+  embedding the real, unmodified public widget bundle via a sandboxed
+  static page (`frontend/public/demo-widget.html`, modeled on Phase 5's
+  dashboard live-preview mechanism); a global, non-tenant-owned
+  `public_leads` model behind a rate-limited, honeypot-protected endpoint
+  with no public read API
+- Zero-cost by design through Phase 7: no paid APIs, no external embeddings,
+  no telephony/SMS/email providers, no paid analytics/fonts/hosting —
+  deterministic local chunking + PostgreSQL full-text search for knowledge,
+  deterministic mock AI provider, browser-native (not server-side) voice
 
 ## Repository layout
 
@@ -99,6 +115,13 @@ Optionally seed three fictional demo tenants for exploring the dashboard
 
 ```bash
 cd backend && .venv/bin/python scripts/seed_demo_data.py
+```
+
+Seed the three fictional, user-less tenants the public `/demo/*` pages
+embed (development only, idempotent, no password anywhere):
+
+```bash
+cd backend && .venv/bin/python scripts/seed_public_demos.py
 ```
 
 ## Verification

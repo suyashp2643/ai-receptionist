@@ -107,6 +107,30 @@ This prints a freshly generated one-time password per demo user directly to
 your terminal — it is never written to any file or tracked document, so
 save it if you want to log in as that demo tenant.
 
+Seed the three fictional, **user-less** tenants the public `/demo/*` pages
+embed (clinic, hotel, real estate) — **development only**, refuses to run
+unless `ENVIRONMENT=development`, idempotent, never prints or stores a
+password (there is no user to have one):
+
+```bash
+cd backend
+.venv/bin/python scripts/seed_public_demos.py
+```
+
+Each demo's public_id (`demo-clinic-sunrise`, `demo-hotel-azurebay`,
+`demo-realestate-falcon`) is fixed, not randomly generated, so
+`frontend/src/lib/demos.ts` can reference it directly — re-running this
+script is always a safe no-op once the three tenants exist. To reset a
+demo's conversation history, delete and re-run:
+
+```sql
+DELETE FROM tenants WHERE slug IN ('public-demo-clinic', 'public-demo-hotel', 'public-demo-realestate');
+```
+(confirm you are connected to `ai_receptionist_dev`, or your own dev
+database, before running this — cascades to every row scoped to those
+three tenants only) followed by re-running
+`scripts/seed_public_demos.py`.
+
 ### Redis (still optional through Phase 4)
 
 `REDIS_URL` is not read by any code path yet — Phase 4's SSE streaming is a
@@ -338,3 +362,45 @@ sequential configuration — there is no separate "fast but flaky" mode
 left anywhere in this project. On a machine with more memory headroom,
 removing this line would very likely be safe, but it should be
 re-verified with the same kind of direct measurement, not assumed.
+
+## 5. Public website & demos (Phase 7)
+
+The public marketing site is part of the same `frontend/` Next.js app
+(the `(marketing)` route group) — `npm run dev` in `frontend/` serves
+both it and the dashboard, no separate process. To try the three
+interactive demos locally you need all three of: the backend running
+(§1), the frontend running (§2), **and** the widget bundle being served
+per §3 (`cd widget && python3 -m http.server 5174`) — a demo page's
+iframe fetches the real bundle from
+`NEXT_PUBLIC_WIDGET_BUNDLE_URL`/`Settings.widget_bundle_url`
+(default `http://localhost:5174/dist/widget.js`), exactly like the
+dashboard's own live preview.
+
+Seed the three demo tenants first (see "Seed data" above), then visit
+`/demo/clinic`, `/demo/hotel`, or `/demo/real-estate`.
+
+**Canonical domain**: `NEXT_PUBLIC_SITE_URL` drives every canonical URL,
+Open Graph tag, and `sitemap.ts`/`robots.ts` entry — defaults safely to
+`http://localhost:3000` if unset. Set it in `frontend/.env.local` once a
+real domain exists; nothing else needs to change.
+
+**Retrieving a submitted lead**: there is no API or dashboard UI for
+this by design (see docs/security.md's Phase 7 threat model) — query the
+table directly:
+
+```bash
+psql "$DATABASE_URL" -c "SELECT full_name, work_email, company, message, created_at FROM public_leads ORDER BY created_at DESC LIMIT 20;"
+```
+
+**Running the new accessibility tests specifically**:
+
+```bash
+cd frontend
+npx vitest run src/components/marketing/accessibility.a11y.test.tsx
+```
+
+Uses `vitest-axe` (a zero-cost devDependency, not a hosted service) — see
+the test file's own docstring for why it asserts on `violations` directly
+rather than the package's `toHaveNoViolations()` custom matcher (that
+matcher's ambient TypeScript augmentation didn't resolve cleanly against
+this project's `tsc --noEmit`).

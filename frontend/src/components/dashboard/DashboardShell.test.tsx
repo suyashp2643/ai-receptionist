@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { DashboardShell } from "./DashboardShell";
-import { SettingsShell } from "@/app/dashboard/settings/SettingsShell";
+import { SettingsShell } from "@/app/(app)/dashboard/settings/SettingsShell";
 import { useDashboardContext } from "./DashboardContext";
 
 let currentPathname = "/dashboard";

@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Interactive demo</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #fafafa;
+  }
+  #demo-banner {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    padding: 6px 12px;
+    background: #fef3c7;
+    color: #78350f;
+    font-size: 12px;
+    font-weight: 600;
+    text-align: center;
+    z-index: 2147483647;
+    border-bottom: 1px solid #fde68a;
+  }
+  #demo-error {
+    margin: 48px 16px 0;
+    padding: 12px;
+    background: #fdecea;
+    color: #a12a2a;
+    border-radius: 6px;
+    font-size: 13px;
+    display: none;
+  }
+</style>
+</head>
+<body>
+  <!--
+    Modeled directly on widget-preview.html (Phase 5's dashboard live-preview
+    page) — same reasoning applies: served from the marketing site's own
+    origin so the backend's public-widget CORS policy and
+    Settings.platform_preview_origins trust it, without that origin ever
+    being written into any tenant's WidgetInstallation.allowed_domains. It
+    embeds the SAME production widget bundle a real customer page would, no
+    demo-specific code path in the widget itself. This page never touches
+    the dashboard's access token, refresh cookie, or CSRF cookie — it has no
+    code that reads or references any of them, and cannot see them even if
+    it tried (a different document, loaded from a sandboxed iframe with no
+    allow-same-origin escape into the parent).
+  -->
+  <div id="demo-banner">Interactive demonstration — powered by deterministic Mock AI</div>
+  <div id="demo-error" role="alert"></div>
+
+  <script>
+    (function () {
+      var params = new URLSearchParams(window.location.search);
+      var publicId = params.get("publicId");
+      var apiBaseUrl = params.get("apiBaseUrl");
+      var bundleUrl = params.get("bundleUrl");
+      var sessionNamespace = params.get("sessionNamespace");
+
+      if (!publicId || !apiBaseUrl || !bundleUrl) {
+        var errorEl = document.getElementById("demo-error");
+        errorEl.textContent = "Missing publicId, apiBaseUrl, or bundleUrl query parameter.";
+        errorEl.style.display = "block";
+        return;
+      }
+
+      var script = document.createElement("script");
+      script.src = bundleUrl;
+      script.async = true;
+      script.setAttribute("data-receptionist-id", publicId);
+      script.setAttribute("data-api-base-url", apiBaseUrl);
+      script.setAttribute("data-visitor-reference", "public-demo");
+      if (sessionNamespace) {
+        script.setAttribute("data-session-namespace", sessionNamespace);
+      }
+      script.onerror = function () {
+        var errorEl = document.getElementById("demo-error");
+        errorEl.textContent =
+          "Could not load the demo widget from " + bundleUrl + ". Is it built and being served?";
+        errorEl.style.display = "block";
+      };
+      document.body.appendChild(script);
+    })();
+  </script>
+</body>
+</html>

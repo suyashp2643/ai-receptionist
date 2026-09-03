@@ -3,6 +3,28 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+
+  /* --- Phase 7 marketing-site design tokens ---
+     Dark navy/charcoal base, warm off-white content surfaces, an electric
+     violet primary accent and a restrained cyan secondary accent. Scoped
+     as its own token set (color-mark-*) rather than overriding
+     --background/--foreground above, since the existing dashboard reads
+     those two directly and must be unaffected. */
+  --color-mark-navy-950: #0b0e1a;
+  --color-mark-navy-900: #10142399;
+  --color-mark-navy-900-solid: #101423;
+  --color-mark-navy-800: #171b2e;
+  --color-mark-navy-700: #232842;
+  --color-mark-surface: #faf8f4;
+  --color-mark-surface-muted: #f1efe9;
+  --color-mark-ink: #14172a;
+  --color-mark-ink-muted: #4b4f66;
+  --color-mark-violet-400: #a78bfa;
+  --color-mark-violet-500: #8b5cf6;
+  --color-mark-violet-600: #7c3aed;
+  --color-mark-cyan-400: #67e8f9;
+  --color-mark-cyan-500: #22d3ee;
+  --color-mark-border: #2a2f4a;
 }
 
 @theme inline {
@@ -10,6 +32,22 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+
+  --color-mark-navy-950: var(--color-mark-navy-950);
+  --color-mark-navy-900: var(--color-mark-navy-900);
+  --color-mark-navy-900-solid: var(--color-mark-navy-900-solid);
+  --color-mark-navy-800: var(--color-mark-navy-800);
+  --color-mark-navy-700: var(--color-mark-navy-700);
+  --color-mark-surface: var(--color-mark-surface);
+  --color-mark-surface-muted: var(--color-mark-surface-muted);
+  --color-mark-ink: var(--color-mark-ink);
+  --color-mark-ink-muted: var(--color-mark-ink-muted);
+  --color-mark-violet-400: var(--color-mark-violet-400);
+  --color-mark-violet-500: var(--color-mark-violet-500);
+  --color-mark-violet-600: var(--color-mark-violet-600);
+  --color-mark-cyan-400: var(--color-mark-cyan-400);
+  --color-mark-cyan-500: var(--color-mark-cyan-500);
+  --color-mark-border: var(--color-mark-border);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -23,4 +61,33 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Respect prefers-reduced-motion everywhere on the public site — Phase 7
+   requirement, not opt-in per component. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 100;
+  padding: 0.75rem 1.25rem;
+  background: var(--color-mark-violet-600);
+  color: white;
+  border-radius: 0 0 0.5rem 0;
+  font-weight: 600;
+}
+
+.skip-link:focus {
+  left: 0;
 }

@@ -731,3 +731,58 @@ decision, as documented, out-of-scope gaps:
   document above also names the concrete future step (a composite
   `(tenant_id, started_at)` index, then pre-aggregation if that stops
   being enough).
+
+## Phase 7 tables
+
+### `public_leads` (global — not tenant-owned)
+
+| Column | Type | Constraints |
+|---|---|---|
+| id | UUID | PK |
+| full_name | VARCHAR(200) | NOT NULL |
+| work_email | VARCHAR(320) | NOT NULL |
+| normalized_email | VARCHAR(320) | NOT NULL, indexed |
+| company | VARCHAR(200) | NOT NULL |
+| website | VARCHAR(500) | nullable |
+| country | VARCHAR(100) | NOT NULL |
+| industry | VARCHAR(100) | NOT NULL |
+| company_size | VARCHAR(50) | NOT NULL |
+| estimated_monthly_volume | VARCHAR(50) | NOT NULL |
+| primary_use_case | VARCHAR(200) | NOT NULL |
+| message | VARCHAR(5000) | NOT NULL |
+| contact_consent | BOOLEAN | NOT NULL |
+| marketing_consent | BOOLEAN | NOT NULL |
+| submitted_ip_hash | VARCHAR(64) | nullable |
+| created_at, updated_at | TIMESTAMPTZ | NOT NULL |
+
+A submission from the public marketing site's contact/demo-request form
+(`POST /api/v1/public/leads` — see docs/api.md). Global, exactly like
+`industry_templates`: a lead is not yet a customer and must never be
+forced under a synthetic "platform tenant" just to satisfy a `tenant_id`
+foreign key. `contact_consent` and `marketing_consent` are two separate
+booleans, never conflated — the form requires the former to submit at
+all and the latter is always optional. `submitted_ip_hash` is a
+truncated SHA-256 hash (same rationale as the widget rate limiter's
+`hash_client_ip` — see docs/security.md), never the raw IP, kept only for
+basic local abuse investigation. **No API exposes this table for
+reading** — see docs/api.md and docs/security.md's Phase 7 threat model
+for why, and docs/local-development.md for how an operator queries it
+directly during local development.
+
+## Known limitations (Phase 7)
+
+- **No admin/read surface exists for `public_leads`.** An operator
+  queries the table directly (docs/local-development.md) rather than
+  through any API — building an internal admin system was explicitly
+  judged out of scope rather than shipped half-built and insecure.
+- **No automated retention/deletion job runs against `public_leads`**,
+  matching every other Phase 5 retention default (declared, not
+  enforced) — see docs/security.md.
+- **The three public demo tenants (`public-demo-clinic`,
+  `public-demo-hotel`, `public-demo-realestate`) are real rows in the
+  same `tenants`/`receptionists`/`widget_installations` tables real
+  customers use** — they are not a separate demo-only schema. They are
+  distinguished only by their fixed `slug`/`public_id` values and by
+  having zero `tenant_members` rows. A future superuser/admin surface
+  that lists all tenants will see these three alongside real ones unless
+  it explicitly filters them out.

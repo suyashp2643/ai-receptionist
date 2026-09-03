@@ -643,6 +643,62 @@ an "Export CSV" button in the dashboard UI (owner/admin only; members do
 not see the control). See docs/security.md's "Export security" section
 for the CSV-injection protection and row-count bound.
 
+## Public marketing website leads (unauthenticated) (Phase 7)
+
+| Method | Path | Auth |
+|---|---|---|
+| POST | `/api/v1/public/leads` | none |
+
+The public marketing site's contact/demo-request form. `PublicLead` is a
+**global model, not tenant-owned** — mirroring `IndustryTemplate`'s
+shape, deliberately not forced under a synthetic "platform tenant."
+
+Request body:
+```json
+{
+  "full_name": "string, max 200",
+  "work_email": "a valid email",
+  "company": "string, max 200",
+  "website": "optional, must start with http:// or https://, max 500",
+  "country": "string, max 200",
+  "industry": "string, max 200",
+  "company_size": "string, max 50",
+  "estimated_monthly_volume": "string, max 50",
+  "primary_use_case": "string, max 1000",
+  "message": "string, max 5000",
+  "contact_consent": true,
+  "marketing_consent": false,
+  "hp_field": ""
+}
+```
+Every plain-text field goes through the same `app/core/text_safety.py`
+policy used for tenant-authored content in Phase 3 — any `<`/`>` is
+rejected outright, not sanitized. `contact_consent` must be `true` to
+submit at all (`422` otherwise); `marketing_consent` is stored as a
+fully separate field, never implied by `contact_consent`. `hp_field` is a
+honeypot: it is hidden from real visitors via CSS and off the tab order
+(`tabindex="-1"`); a non-empty value causes the submission to be silently
+dropped (never persisted) while still consuming one unit of rate limit
+and returning the identical response below — a caller can never
+distinguish a honeypot drop from a real save.
+
+Response (`201`, identical whether saved or honeypot-dropped):
+```json
+{ "received": true }
+```
+
+Rate limited to 5 submissions/hour per hashed client IP (the existing
+`app/core/rate_limit.py` `InMemoryRateLimiter`, keyed without a widget
+installation — see its single-process caveat in docs/security.md);
+exceeding it returns `429` with a `Retry-After` header.
+
+**There is no `GET`/list endpoint for leads at all** — the only method
+registered on this path is `POST` (`GET` returns `405`). A submitted
+lead is retrieved only via a direct local database query — see
+docs/local-development.md — a deliberate choice over building an
+under-scoped internal admin/read surface for this phase; see
+docs/security.md's Phase 7 threat model for the reasoning.
+
 ## Error shape
 
 Every error response (from `app/core/errors.py`) has the same shape:
@@ -652,21 +708,26 @@ Every error response (from `app/core/errors.py`) has the same shape:
 (422 validation errors additionally include `"details": [...]` — the
 Pydantic error list, safely JSON-encoded via `jsonable_encoder`.)
 
-## Not implemented in Phase 5/6
+## Not implemented in Phase 5/6/7
 
-Billing/subscriptions, actual telephone calls, Twilio, WhatsApp/SMS, live
-calendar booking (appointment requests are always `pending` until a human
-explicitly confirms them — structured service/location *selection* is
-implemented, but selecting one is never a real availability check), sending
-real email, CRM synchronization, Revenue Brain / AI Sales Employee
-integration, paid AI provider usage by default, an automated data-
-retention/deletion job (defaults are declared and configurable; nothing
-executes them yet — see `docs/security.md`), and any public marketing site
-or Phase 7 industry-demo landing pages — all later, explicitly-approved
-phases. A real (non-mock) provider's HTTP calls, embeddings, website
-crawling, document parsing, and server-side voice processing are likewise
-still out of scope; browser-native voice (Web Speech API) is implemented in
-the widget bundle only, with no server-side counterpart.
+Billing/subscriptions or any payment processing (the Phase 7 pricing page
+shows explicitly-placeholder prices and has no checkout flow), actual
+telephone calls, Twilio, WhatsApp/SMS, live calendar booking (appointment
+requests are always `pending` until a human explicitly confirms them —
+structured service/location *selection* is implemented, but selecting one
+is never a real availability check), sending real email (including no
+email-sending integration for public leads — see the leads section
+above), CRM synchronization, Revenue Brain / AI Sales Employee
+integration, paid AI provider usage by default, paid analytics, an
+automated data-retention/deletion job (defaults are declared and
+configurable; nothing executes them yet — see `docs/security.md`), and any
+production hosting/domain/CDN for the public marketing site (it runs
+against `NEXT_PUBLIC_SITE_URL`, defaulting safely to
+`http://localhost:3000`). A real (non-mock) provider's HTTP calls,
+embeddings, website crawling, document parsing, and server-side voice
+processing are likewise still out of scope; browser-native voice (Web
+Speech API) is implemented in the widget bundle only, with no server-side
+counterpart.
 
 Phase 6 specifically does not include: a tenant-switcher UI (a user
 belonging to more than one tenant can only reach the first one in their

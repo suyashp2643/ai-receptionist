@@ -15,6 +15,7 @@ from app.api.v1 import (
     locations,
     notes,
     onboarding,
+    public_leads,
     receptionists,
     services,
     tenants,
@@ -46,3 +47,4 @@ api_router.include_router(dashboard_records.router, tags=["dashboard-records"])
 api_router.include_router(notes.router, tags=["notes"])
 api_router.include_router(activity.router, tags=["activity"])
 api_router.include_router(exports.router, tags=["exports"])
+api_router.include_router(public_leads.router, tags=["public-leads"])

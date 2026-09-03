@@ -58,8 +58,19 @@ class BaseTool(ABC):
 def _bound_output(value: object, *, depth: int = 0) -> object:
     """Recursively bounds list length and string length in a tool's raw
     output — a defensive backstop, not the primary bounding mechanism
-    (each tool already caps its own result sizes)."""
-    if depth > 4:
+    (each tool already caps its own result sizes).
+
+    depth > 4 (Phase 7 bug, found via live testing of the public demos):
+    get_business_hours' legitimate output is
+    {"days": [ {"intervals": [ {"start": "08:00", ...} ] } ]} — dict(0) ->
+    list(1) -> dict(2) -> list(3) -> dict(4) -> the "08:00" string itself is
+    visited at depth=5, one level past a cutoff of >4, silently replacing
+    every real start/end time with None and producing a "None-None" hours
+    response with no error anywhere in the pipeline (the tool call itself
+    reports status "ok"). 8 keeps meaningful headroom above any
+    currently-shipped tool's real nesting while still bounding a
+    pathologically deep structure."""
+    if depth > 8:
         return None
     if isinstance(value, str):
         return value if len(value) <= MAX_TOOL_OUTPUT_STRING_CHARS else value[:MAX_TOOL_OUTPUT_STRING_CHARS]

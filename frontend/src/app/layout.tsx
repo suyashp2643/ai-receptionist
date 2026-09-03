@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
-import { AuthProvider } from "@/lib/auth-context";
+import { brand } from "@/lib/brand";
+import { getSiteUrl } from "@/lib/seo";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -14,8 +15,12 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AI Receptionist",
-  description: "Multi-tenant AI receptionist platform",
+  metadataBase: new URL(getSiteUrl()),
+  title: {
+    default: brand.metadata.defaultTitle,
+    template: `%s | ${brand.productName}`,
+  },
+  description: brand.metadata.defaultDescription,
 };
 
 export default function RootLayout({
@@ -28,7 +33,7 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        <AuthProvider>{children}</AuthProvider>
+        {children}
       </body>
     </html>
   );

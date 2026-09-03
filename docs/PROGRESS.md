@@ -1852,5 +1852,609 @@ this phase's scope. See docs/PROGRESS.md for the full accounting of both
 rounds' verification results.
 ```
 
-**Awaiting explicit review and commit approval. Phase 7 has not been
+**Phase 6 approved and committed as `ba7a6a3` on `main`.**
+
+## Phase 7 — Public Marketing Website & Interactive Industry Demos (complete, awaiting commit approval)
+
+### What was built
+
+A polished, conversion-focused public marketing website presenting the
+platform as a credible SaaS product, plus three genuinely interactive
+demos — all reusing Phase 4-6 infrastructure rather than building a
+parallel system, and all zero-cost.
+
+- **Branding, pricing, demo, and SEO configuration** —
+  `frontend/src/lib/{brand,pricing,demos,seo}.ts`. The final brand name has
+  not been chosen; every page reads `brand.productName`/`brand.tagline`/
+  etc. from `brand.ts` rather than hardcoding a name, so renaming the
+  product later means editing one file. Pricing is three plans (Starter/
+  Growth/Scale) driven by `pricing.ts`, every price explicitly flagged
+  `isPlaceholder: true` — Scale uses `null` ("Contact us") rather than a
+  speculative number. `seo.ts` centralizes the canonical domain
+  (`NEXT_PUBLIC_SITE_URL`, defaulting safely to `http://localhost:3000`)
+  and JSON-LD builders (Organization, SoftwareApplication, FAQPage,
+  BreadcrumbList).
+- **An original geometric SVG brand mark** (`BrandMark.tsx`) — three plain
+  shapes (no imported artwork, no icon font, no copyrighted or paid
+  asset).
+- **A `(marketing)` Next.js route group**, deliberately separate from a
+  new `(app)` route group now holding `login`/`register`/`onboarding`/
+  `dashboard`. This split was necessary, not stylistic — see "A real bug
+  found and fixed" below.
+- **16 public routes**: `/`, `/product`, `/industries`,
+  `/industries/{clinics,hotels,real-estate}`, `/demo`,
+  `/demo/{clinic,hotel,real-estate}`, `/pricing`, `/security`, `/about`,
+  `/contact`, `/privacy`, `/terms` — plus `robots.ts`, `sitemap.ts`, and a
+  branded `not-found.tsx`. All 16 render as static content (prerendered at
+  build time); dashboard/login/onboarding routes are unaffected.
+- **The homepage** — hero with a real interactive widget embed (not a
+  static screenshot) labeled "Mock AI demo", a trust/value strip, a
+  4-step "how it works", industry cards, a capabilities grid, a dashboard
+  showcase reusing the actual `KpiCard`/`SimpleBarChart` dashboard
+  components with explicitly-labeled sample data ("Sample data — not a
+  real customer"), a safety/security section, a pricing preview, an FAQ
+  with `FAQPage` JSON-LD, and a final CTA. Copy avoids unverifiable
+  claims and superlatives (locked in by an automated test — see below).
+- **Three industry landing pages** (clinics/hotels/real-estate) via a
+  shared `IndustryPage` template component: hero, pain points, workflow,
+  capabilities, an explicit safety/limitations section (clinics: "does
+  not diagnose, prescribe, or replace a medical professional"; hotels:
+  reservation requests are not confirmed bookings, multilingual support
+  is labeled planned, not available; real estate: never verifies legal
+  title or gives investment guarantees), demo CTA, FAQ (`FAQPage` +
+  `BreadcrumbList` JSON-LD), final CTA.
+- **Three interactive demos**, each a real, fictional, user-less tenant**
+  (`backend/app/seed_data/public_demo_tenants.py`, seeded via
+  `scripts/seed_public_demos.py`): Sunrise Family Clinic
+  (`demo-clinic-sunrise`), Azure Bay Resort (`demo-hotel-azurebay`),
+  Falcon Heights Realty (`demo-realestate-falcon`) — distinct welcome
+  message, services, FAQs, knowledge document, working hours, and
+  suggested questions each, with safety behavior automatically
+  industry-appropriate (clinic safety rules trigger only for the clinic
+  tenant, via the existing `industry_template_key` check in
+  `app/ai/safety.py`). Each demo tenant has zero `tenant_member` rows and
+  no `User` at all — "if demo users are unnecessary, do not create them"
+  is true here, since the public widget API never requires a dashboard
+  login.
+- **`frontend/public/demo-widget.html`** — a static, dependency-free page
+  modeled directly on Phase 5's `widget-preview.html`: reads
+  `publicId`/`apiBaseUrl`/`bundleUrl`/`sessionNamespace` query params and
+  injects the real widget bundle script tag, served from the marketing
+  site's own origin so it is trusted via the existing
+  `Settings.platform_preview_origins` mechanism without ever being
+  written into any tenant's `allowed_domains`. `data-visitor-reference`
+  is `"public-demo"` (distinct from the dashboard preview's
+  `"dashboard-preview"`), tagging traffic distinctly while still
+  resolving to `is_platform_preview = true` — Origin-header-based
+  classification, never client-supplied — so demo traffic is excluded
+  from "production" analytics by the exact same server-verified mechanism
+  Phase 5/6 already built and tested.
+- **`DemoWidgetEmbed`** (client component) — mounts the sandboxed iframe
+  (`allow-scripts allow-same-origin allow-forms`), generates a fresh
+  `sessionNamespace` in a `useEffect` (never during the initial render —
+  see "A real bug found" below) so restarting a demo remounts the iframe
+  under a new `key`, starting a genuinely new, isolated conversation.
+  Reused as the homepage's hero preview and on all three `/demo/*` pages.
+- **A public, zero-cost lead-capture endpoint** —
+  `POST /api/v1/public/leads` (`backend/app/api/v1/public_leads.py`,
+  `app/schemas/public_lead.py`, `app/services/public_lead_service.py`).
+  `PublicLead` (`app/models/public_lead.py`) is a **global, not
+  tenant-owned model** — deliberately mirroring `IndustryTemplate`'s
+  shape rather than inventing a synthetic "platform tenant" just to reuse
+  `TenantContext`. Server-side validation reuses Phase 3's
+  `app/core/text_safety.py` plain-text policy (any `<`/`>` rejected
+  outright) plus `EmailStr`, explicit max lengths on every field, and a
+  required `contact_consent` boolean kept fully separate from optional
+  `marketing_consent`. A honeypot field (`hp_field`) causes a submission
+  to be silently dropped — never persisted — while still returning the
+  identical `{"received": true}` response and **still counting against
+  the rate limit**, so a bot cannot use the honeypot itself to bypass
+  throttling. Rate limiting reuses the existing
+  `app/core/rate_limit.py` `InMemoryRateLimiter`/`RateLimiter` Protocol
+  via a new IP-only-keyed dependency (the existing one keys on widget
+  installation, which doesn't exist for this route) — 5 submissions/hour
+  per hashed IP. **There is no public read endpoint** — a lead is
+  retrieved only via a direct local database query (see
+  docs/local-development.md), a deliberate choice over building an
+  under-scoped internal admin/global-read surface.
+- **A shared `main-layout `<AuthProvider>` boundary redrawn** — see
+  below.
+
+### A real bug found and fixed — `AuthProvider` firing on every public page
+
+Live-testing the homepage surfaced an unnecessary
+`POST /api/v1/auth/refresh` request (and a `403`, correctly, since no
+dashboard session exists) on every load of every public marketing page.
+Root cause: the root layout (`frontend/src/app/layout.tsx`) wrapped
+**all** routes in `<AuthProvider>`, which unconditionally attempts a
+token refresh on mount. This directly violated two Phase 7 requirements
+at once — "avoid unnecessary backend calls on static pages" and "public
+marketing routes do not receive dashboard authentication cookies
+unnecessarily." Fixed by moving `login/`, `register/`, `onboarding/`, and
+`dashboard/` into a new `(app)` route group with its own
+`layout.tsx` providing `<AuthProvider>`, and removing it from the root
+layout entirely — the `(marketing)` group now has zero dependency on the
+auth module tree. Verified live: `document.cookie` on any `/demo/*` page
+shows only Next.js's own dev-HMR cookie, and no `auth/refresh` call fires
+at all. Regression coverage: none of the 132 pre-existing dashboard tests
+needed changes beyond updating one stale import path
+(`DashboardShell.test.tsx`), confirming the move was purely structural.
+
+### A real bug found and fixed — hydration mismatch in `DemoWidgetEmbed`
+
+`sessionNamespace` was originally generated via `useState(() =>
+crypto.randomUUID())` — an initializer that runs once during Next.js's
+server-side render of a Client Component and once again during client
+hydration, producing two different random values and a full React
+hydration-mismatch error on every demo page load. Fixed by starting
+`sessionNamespace` at `null` and generating the real value only inside a
+`useEffect` (client-only, runs after hydration), rendering nothing but a
+correctly-sized placeholder `div` (reserving the iframe's height, so no
+layout shift) until then.
+
+### A real, pre-existing (Phase 4) bug found and fixed via live demo testing — `_bound_output`'s recursion-depth cutoff
+
+Asking the clinic demo "Are you open on Saturday?" answered **"Our hours
+are — Monday: None-None; Tuesday: None-None; ..."** — every real time
+silently replaced with `None`, with the `get_business_hours` tool call
+itself still reporting `status: "ok"` (no error surfaced anywhere in the
+SSE stream). Root-caused by tracing the exact data path: calling
+`GetBusinessHoursTool.run()` directly against the real seeded data
+returned fully correct `{"start": "08:00", "end": "17:00"}` values, but
+`execute_tool()` (`app/ai/tools/base.py`) passes every tool's raw output
+through `_bound_output()` — a recursive depth/length limiter applied as a
+defense-in-depth backstop to every tool's result. Its cutoff was `depth >
+4`, but the real shape is `dict(0) → days list(1) → day dict(2) →
+intervals list(3) → interval dict(4) → the "08:00" string itself(5)` —
+one level past the cutoff, so every leaf string was replaced with `None`
+silently, with no test ever having exercised this exact 5-level nesting
+(the one existing test only asserted on `day_name`, at depth 3). Fixed by
+raising the cutoff to `depth > 8` (documented in the function's own
+docstring with the full depth-by-depth trace) and adding both a
+unit-level regression test for the exact shape
+(`TestBoundOutputDepth.test_the_business_hours_shape_depth_survives`) and
+a confirmation that pathologically deep structures are still bounded
+(`test_a_pathologically_deep_structure_is_still_bounded`), plus an
+integration-level regression test
+(`TestGetBusinessHoursTool.test_interval_start_and_end_survive_bounded_output`).
+Verified fixed live via the real public API afterward — the same
+question now correctly answers "Monday: 08:00-17:00; ... Saturday:
+08:00-17:00." This is a genuine Phase 4 bug that had shipped through
+Phases 4, 5, and 6 undetected, since no prior tenant's live testing
+happened to populate real, multi-level `working_hours` interval data —
+found only because this phase's demo seed data deliberately did.
+
+### A real responsive bug found and fixed — cramped header at the tablet breakpoint
+
+Live-testing at the tablet preset (768×1024) showed "Security" and
+"Login" rendering with no space between them ("SecurityLogin") and the
+brand wordmark wrapping to two lines — the desktop nav (5 links + Login +
+a pill CTA) switched on at Tailwind's `md:` breakpoint (768px) with no
+room to fit. Fixed by moving both the desktop-nav and mobile-toggle
+breakpoints from `md:` to `lg:` (1024px) in `Header.tsx`, so tablet
+widths consistently get the already-solid, already-tested mobile nav
+instead of a cramped desktop one. Verified live at 768px afterward: clean
+single-line header, hamburger menu, no overlap.
+
+### An accessibility bug found and fixed — `BrandMark`'s empty `aria-label`
+
+The automated axe-core pass (see Testing below) failed on both `Header`
+and `Footer` with `svg-img-alt`: `BrandMark` was marked `role="img"
+aria-label=""` — an image role with no accessible name. Since the mark
+always sits directly beside the visible "AI Receptionist" wordmark in
+both places it's used, the correct fix was to make it properly
+decorative (`aria-hidden="true"`, no `role`) rather than inventing a
+redundant label.
+
+### A real heading-hierarchy bug found and fixed — homepage's trust strip
+
+The same axe-core pass failed the homepage with `heading-order`: the
+trust/value-strip section used `<h3>` cards with no `<h2>` anywhere in
+that section, jumping straight from the `<h1>` hero to `<h3>`. Fixed by
+adding a visually-hidden (`sr-only`) `<h2>What it handles</h2>` — present
+for assistive technology and correct document structure, without
+changing the visual design.
+
+### Verification results (all passing)
+
+- **Backend**: 445 pytest passed (up from 425), including 12 explicit
+  `pytest -m multiconn` tests (unchanged from Phase 6 — this phase added
+  no new database-connection-touching integration tests beyond the
+  existing suite); Ruff clean; Mypy clean (170 source files); `alembic
+  current` at head (`161846266d69`), `alembic check` clean, full
+  upgrade → downgrade → upgrade cycle verified. 20 new backend tests:
+  13 for the public-leads endpoint (validation, normalization, honeypot
+  — including that a honeypot hit still counts against the rate limit,
+  consent separation, no public read endpoint, rate limiting), 4 for the
+  demo-tenant seed module (creates exactly 3, zero members/users, fully
+  idempotent, each demo has distinct content), 3 regression tests for
+  the `_bound_output` bug above.
+- **Frontend**: 185 Vitest passed (up from 132), run with the normal
+  `vitest run` command (no `--no-file-parallelism` override needed);
+  ESLint clean; `tsc --noEmit` clean; production build succeeds — 49
+  routes total (up from 32), all 16 new public routes statically
+  prerendered at 168 B–2.5 kB each, `robots.txt`/`sitemap.xml` generated.
+  53 new frontend tests: Header (nav links, mobile menu open/close,
+  Escape-to-close-and-return-focus, keyboard reachability),
+  DemoWidgetEmbed (correct iframe src/sandbox, no
+  Authorization/token/cookie value ever in the src, restart generates a
+  new session namespace, two simultaneous demo instances never share a
+  namespace), ContactForm (honeypot hidden and off-tab-order, consent
+  separation, blocked-without-consent, successful-submission payload
+  shape, 429 rate-limit message, network-failure message), homepage
+  (hero CTAs, Mock AI disclosure, sample-data label, placeholder-pricing
+  label, an automated scan for banned superlative phrases), an industry
+  page (exact safety wording), the pricing page (renders from
+  configuration, no checkout UI), `seo.ts`'s metadata/JSON-LD builders,
+  and the `pricing.ts`/`demos.ts` configuration modules themselves.
+  6 new **automated accessibility tests** (`vitest-axe`, a zero-cost npm
+  devDependency — not a certification claim) against Header, Footer,
+  ContactForm, the homepage, an industry page, and the pricing page,
+  which is how the `BrandMark` and heading-order bugs above were found.
+- **Widget**: 40 Vitest passed; ESLint clean; `tsc --noEmit` clean;
+  bundle rebuilds at 27,145 bytes — byte-for-byte unchanged, since this
+  phase made no widget code changes.
+
+### Migration verification
+
+`161846266d69` (parent `4782a62b4927`) adds exactly one new,
+standalone table (`public_leads`) — no existing table is touched, so
+unlike `4782a62b4927` there is no `server_default`-on-a-non-empty-table
+concern. `alembic upgrade head`, `alembic downgrade -1`, `alembic upgrade
+head` again, then `alembic check` — all clean, no drift.
+
+### Live end-to-end verification
+
+Using the real local stack (Postgres, mock AI, real FastAPI + Next.js
+dev servers), against the real seeded demo tenants:
+
+Confirmed live, in the browser: all 16 public routes return `200` (a
+nonexistent path correctly returns `404`); `/dashboard`, `/login`,
+`/register` remain fully functional (client-side auth guard correctly
+redirects an unauthenticated `/dashboard` visit to `/login`); the
+homepage's hero demo embed opens and holds a real conversation.
+
+**Clinic demo**: "What services do you offer?" and "Are you open on
+Saturday?" both answer correctly from the seeded FAQ/working-hours data
+(the latter only after the `_bound_output` fix above); "I need an
+appointment tomorrow." correctly starts the qualification flow (asks new
+vs. existing patient); a live, unscripted "I have severe chest pain right
+now" correctly triggered the exact deterministic safety response
+("This may be a medical emergency... call 911... I'm not able to assess
+how serious this is...") — verified as the literal message text via the
+widget's own shadow DOM, not inferred from a screenshot.
+
+**Hotel demo**: "Do you have airport pickup?" correctly answers from the
+seeded FAQ ("Yes — Azure Bay Resort offers a complimentary airport
+shuttle..."). "I'd like to stay for three nights" surfaces a pre-existing
+(Phase 3/4, not introduced by this phase) qualification-flow quirk: the
+engine validates free-text input against whichever qualification field is
+currently expected (here, a check-in date) before composing an answer,
+producing a combined "that doesn't look like a valid date... [answer if
+any]... could you share your check-in date?" message rather than a
+cleanly separated one. Documented as a known limitation below rather than
+altered, since changing Phase 4's shared qualification-composition
+ordering is out of this phase's scope and risks regressions across every
+tenant, not just demos — the required "staff confirmation, not a
+guaranteed booking" framing is still honestly present, both in the
+tenant's own knowledge document and in the demo page's own safety-note
+sidebar text.
+
+**Real estate demo**: "Can I schedule a site visit?" correctly answers
+from the seeded FAQ, explicitly stating "Site visits are requests, not
+confirmed bookings, until an agent follows up." A live, unscripted "What
+is the weather like on Mars?" correctly produced the honest fallback —
+"I couldn't find anything about that in what's been shared with me" —
+rather than an invented answer.
+
+**Session isolation**: clicking "Restart demo" on the real estate demo
+was confirmed, via the iframe's own `src`, to generate a new
+`sessionNamespace` and remount the iframe as a genuinely new DOM node;
+reopening the widget afterward showed only the fresh welcome message —
+none of the prior conversation's messages survived. `DemoWidgetEmbed`'s
+own session namespace is generated independently per mounted instance,
+confirmed by an automated test that two simultaneously-rendered demos
+never share one.
+
+**No dashboard credential exposure**: `document.cookie` read from a
+`/demo/*` page shows no dashboard refresh or CSRF cookie — only Next.js's
+own dev-HMR cookie — confirming the `AuthProvider` fix above holds in a
+real browser, not just in the unit-test mock.
+
+**Contact form**: submitting with the required consent checkbox
+unchecked was blocked client-side with a specific error and no network
+request; submitting with the `company` field empty produced a real `422`
+from the server (client correctly showed a generic "something went
+wrong" message, never leaking the field-level validation detail);
+submitting a fully valid payload succeeded, showed the generic "Thanks —
+we've got it." success state, and was confirmed, via a direct database
+query, to have persisted correctly with `contact_consent = true`,
+`marketing_consent = false` (matching what was actually checked), and a
+non-reversible IP hash (never the raw address).
+
+**Responsive checks**: mobile (375×812) — no horizontal overflow on the
+homepage, pricing (whose feature-comparison table sits in its own
+`overflow-x-auto` wrapper), or a demo page; the mobile nav opens with all
+expected links and a visible close control. Tablet (768×1024) — see the
+header bug above; confirmed fixed. Desktop — unaffected throughout.
+
+**Keyboard/DOM-order accessibility**: confirmed via direct DOM inspection
+that the skip-link (`href="#main-content"`, targeting a real element ID
+present on every marketing page) is the first focusable element in
+document order, followed by the brand link then primary nav in reading
+order — the live browser-automation tool's synthetic Tab key did not
+reliably reach the page's own focus system in this environment, so real
+keyboard-interaction assertions (Escape closes the mobile menu and
+returns focus to the toggle button; every mobile nav link is reachable)
+are covered by `Header.test.tsx`'s `userEvent`-driven tests instead,
+which exercise genuine browser focus/keyboard behavior in jsdom.
+
+**No lingering connections**: after the full live session, `pg_stat_activity`
+showed zero `idle in transaction` sessions and `pg_locks` showed zero
+ungranted locks.
+
+### Known limitations (Phase 7)
+
+Two gaps from Phase 7's original round — the hotel demo's contradictory,
+mechanically-concatenated qualification responses, and the clinic demo's
+robotic field-label echo — were resolved in the Phase 7 remediation round
+below, along with deleting the one live-verification test lead. The
+limitations below remain, by explicit decision, as documented,
+out-of-scope gaps:
+
+- **No admin/read UI exists for `public_leads`.** A submitted lead is
+  retrieved only via a direct local database query (documented in
+  docs/local-development.md) — a deliberate choice over building an
+  under-scoped internal admin surface just for this phase; see
+  docs/security.md's Phase 7 threat model for the reasoning.
+- **No production hosting, domain, or CDN exists** — `NEXT_PUBLIC_SITE_URL`
+  defaults to `http://localhost:3000`; `robots.ts`/`sitemap.ts` and every
+  canonical/Open Graph URL are correct for whatever domain is configured,
+  but no domain has actually been registered or deployed to.
+- **No Lighthouse run was performed** — this environment has no headless
+  Chrome available and none was installed solely to produce a score (see
+  the final report's Performance section for what was measured instead:
+  route-level bundle sizes from the real production build output).
+- Every other Phase 1-6 known limitation (no tenant switcher, no
+  invite-a-teammate endpoint, live-only analytics, single-process rate
+  limiting, declared-but-unenforced retention defaults, no compliance
+  certification) remains unchanged and is not repeated here — see
+  docs/database-schema.md and docs/security.md.
+
+### Phase 7 remediation round (complete)
+
+Phase 7's original round explicitly documented two visitor-facing
+qualification/composition defects as known limitations rather than
+fixing them, since the fix required changing shared Phase 4 orchestration
+behavior, not tenant-specific text. This round fixes both at the shared,
+deterministic-composition level (`app/ai/providers/mock.py`), never with
+a hardcoded string for any individual demo tenant.
+
+#### Root causes
+
+- **Hotel demo's contradictory/mechanically-concatenated responses**:
+  `_rejection_note` unconditionally wrapped an already-complete `reason`
+  sentence (e.g. `"I couldn't find a valid date in that (try
+  YYYY-MM-DD)."`, produced by `app/ai/qualification.py`'s per-type
+  extraction) inside a second, redundantly-phrased lead-in — `"That
+  doesn't look like a valid {field_label} — {reason}"` — so every
+  rejection read as two overlapping "this isn't valid" phrases stacked
+  together. Separately, `_compose()` always appended this rejection note
+  even when the same message also produced a genuine, unrelated answer
+  from a tool or FAQ (e.g. asking "Do you have airport pickup?" while a
+  check-in date was still pending), reading as self-contradictory next
+  to an answer that was, in fact, helpful and correct.
+- **Clinic demo's robotic acknowledgment**: `_acknowledgment` echoed a
+  captured qualification field's raw *label* — which is sometimes itself
+  phrased as a question (e.g. "What service do you need?") — back as if
+  it were the answer, producing `"Got it — I've noted your What service
+  do you need?."` `QualificationFieldSummary` (the object the mock
+  provider receives) was never given the actual *captured value* to
+  reference instead, only the field's key/label/type/options.
+
+#### The fix
+
+`app/ai/providers/mock.py` (the only file changed — no schema, no
+extraction/validation logic touched):
+
+- `_acknowledgment` now looks up the actual captured/corrected value from
+  `qualification.collected_data` (already present on the object it
+  receives) and renders it through a new `_format_captured_value(field,
+  value)`, type-aware: a `single_select`/`multi_select` value renders as
+  its configured option **label**, `boolean` as "yes"/"no",
+  `short_text`/`long_text` as the value quoted (with a single trailing
+  sentence-ending mark stripped first, so a full-sentence answer doesn't
+  produce a doubled period against the acknowledgment's own), everything
+  else as its plain value, truncated at 60 characters. Never the field's
+  internal `key`, never its label. A correction is phrased distinctly
+  from a fresh capture ("Thanks — I've updated that to X" vs. "Got it —
+  I've noted that as X"), so an overwritten value is clearly
+  distinguishable from a new answer.
+- `_rejection_note` now renders `reason` directly — one concise,
+  already-complete sentence per rejection, with no redundant
+  "doesn't-look-like-valid" wrapper stacked on top.
+- `_compose()` now composes the qualification rejection note only when
+  **no** real answer was found for the same message; when an answer was
+  found (a genuine question, including the honest "I couldn't find
+  anything about that" fallback), the rejection is suppressed entirely —
+  nothing was captured either way, so suppressing the note only removes
+  a confusing juxtaposition, never a data-safety signal (the field stays
+  pending and is asked again in the very same turn, exactly as before).
+
+This is deterministic, config-driven behavior — the same code path runs
+for every tenant's every qualification field, verified across
+`single_select`, `multi_select`, `boolean`, `email`, `phone`, `number`,
+`date`, and `short_text`/`long_text` types, not special-cased per demo.
+Clinic/legal safety (`app/ai/safety.py`) is untouched and checked first,
+entirely outside this code path, exactly as before.
+
+#### Tests added
+
+`backend/tests/test_ai_mock_provider_composition.py` (new, 20 tests):
+unit coverage of `_format_captured_value` across every field type above;
+`_acknowledgment` never echoing a raw/question-phrased label or an
+internal key, and phrasing a correction distinctly from a capture;
+`_rejection_note` producing exactly one concise sentence with no
+redundant lead-in; and four end-to-end tests through the real
+`test-conversations` API reproducing the exact reported scenarios — the
+hotel "I'd like to stay for three nights" message producing one clean
+correction with nothing stored under the date field, a valid date being
+captured and acknowledged naturally, an airport-pickup-style question
+suppressing the rejection note beside its real answer, and the clinic
+select-field capture being acknowledged by the chosen option's label
+with the emergency-language safety response confirmed byte-for-byte
+unaffected.
+
+`backend/tests/test_public_leads_api.py` was also hardened in this round
+(5 tests were failing — see below): its assertions now compare
+before/after row counts and read back the most-recently-created row by
+`created_at`, rather than assuming the table starts empty, since this
+shared dev database can carry rows left by earlier manual verification.
+
+#### Live end-to-end re-verification (after the shared fix)
+
+Re-ran all three demos live in the real browser against the real
+backend:
+
+- **Hotel**: "I'd like to stay for three nights" → exactly `"I couldn't
+  find a valid date in that (try YYYY-MM-DD). Could you share your
+  check-in date?"` — one correction, one next-field question, nothing
+  captured under `checkin_date`. "Do you have airport pickup?" → the
+  real FAQ answer with **no** date-rejection text anywhere in the
+  response.
+- **Clinic**: "I need an appointment tomorrow." → `"Got it — I've noted
+  that as "I need an appointment tomorrow". Could you tell me: are you a
+  new or existing patient? ..."` — quoted free text, single period, no
+  field label, no internal key. "New patient" → `"Got it — I've noted
+  that as New patient. Could you share your full name?"` — the select
+  option's own label, not the question-phrased field label. "I have
+  severe chest pain right now" → the exact, unchanged deterministic
+  safety response, byte-for-byte identical to Phase 1-7's existing
+  behavior.
+- **Real estate**: the same rejection-suppression fix verified against a
+  `single_select` pending field (not just `date`) — "Can I schedule a
+  site visit?" → the real FAQ answer ("...requests, not confirmed
+  bookings...") with no contradictory rejection text; "What is the
+  weather like on Mars?" → the honest fallback, unaffected.
+- **Session isolation**: "Restart demo" re-confirmed to remount the
+  iframe under a new session namespace with only the welcome message
+  present afterward.
+- **No dashboard credential exposure**: re-confirmed — `document.cookie`
+  on a `/demo/*` page shows only Next.js's own dev-HMR cookie.
+- **Analytics exclusion**: re-confirmed via a direct database query —
+  every conversation generated through the real Browser pane during this
+  round classified `is_platform_preview = true`; a handful of
+  `curl`-originated verification calls (no `Origin` header, as expected
+  for a non-browser client) correctly classified `false` — exactly the
+  designed, Origin-header-based behavior, not a regression.
+
+#### Verification results (all passing)
+
+- **Backend**: 464 pytest passed (up from 445 — the 20 new composition
+  tests above), including 12 explicit `pytest -m multiconn` tests
+  (unchanged); Ruff clean; Mypy clean (170 source files, unchanged file
+  count — no new source module, only the one file edited plus new
+  tests); `alembic current` at head (`161846266d69`, unchanged — this
+  round made no schema changes), `alembic check` clean.
+- **Frontend**: 185 Vitest passed (unchanged — no frontend files touched
+  this round); ESLint clean; `tsc --noEmit` clean; production build
+  succeeds, 49 routes (unchanged).
+- **Widget**: 40 Vitest passed (unchanged); ESLint clean; `tsc --noEmit`
+  clean; bundle rebuilds at 27,145 bytes — byte-for-byte unchanged (no
+  widget code touched).
+
+#### Phase 7 verification-data cleanup (this round)
+
+- **Test lead deleted**: confirmed against `ai_receptionist_dev`, the
+  lead (`id = a542153c-ad73-4de4-bf12-f7e3828bdc16`, `full_name = "Priya
+  Sharma"`) existed, was deleted in one committed transaction, and its
+  absence (and the table's now-zero row count) was verified afterward.
+- **Demo-tenant runtime data reset**: the three seeded demo tenants were
+  identified by their fixed, stable `slug` values
+  (`public-demo-clinic`/`public-demo-hotel`/`public-demo-realestate`),
+  cross-checked against the full tenant list to confirm none of the four
+  pre-existing non-demo tenants were included, and their disposable
+  runtime data (conversations and everything that cascades from a
+  conversation by foreign key — messages, summaries, visitor sessions,
+  enquiries, appointment requests, handoffs, internal notes; `contacts`
+  uses `ON DELETE SET NULL` on `conversation_id`, moot here since the
+  count was zero) was deleted in one transaction, scoped to the three
+  exact tenant IDs only — never a name pattern, never a broader
+  condition. Every permanent configuration table (business profiles,
+  receptionists, workflows, locations, services, FAQs, knowledge
+  sources/documents/chunks, widget installations) was confirmed
+  unchanged by row count before and after. This was done twice in this
+  round — once before the section-4 live re-verification above, and
+  once after, to leave the demos in their intended fresh, zero-history
+  state for the next visitor.
+- Re-ran `scripts/seed_public_demos.py` afterward: confirmed still fully
+  idempotent (0 created, 3 skipped, existing configuration untouched).
+- Confirmed each demo's public config endpoint still reports
+  `status: "active"` with the correct business name/welcome message, and
+  a freshly created session starts with no prior messages
+  (`last_message_at: null`).
+- Confirmed all four pre-existing non-demo tenants (`Meridian Realty
+  Group`, `Brightsmile Dental Clinic`, `The Wren Boutique Hotel`,
+  `Phase3 QA Workspace`) unchanged (`updated_at` identical to before this
+  round) both before and after every deletion.
+- Confirmed zero orphaned records (messages/visitor-sessions/enquiries
+  with no matching conversation), zero idle-in-transaction sessions, and
+  zero ungranted locks after every deletion in this round.
+
+### Revised Phase 7 commit message
+
+Nothing has been committed yet, so this supersedes the earlier draft
+above with one message covering the full, still-uncommitted Phase 7
+changeset — original build plus this remediation round.
+
+```
+Add public marketing website and interactive industry demos (Phase 7)
+
+Add a public (marketing) Next.js route group — 16 static routes (home,
+product, three industry landing pages, three interactive demos, pricing,
+security, about, contact, privacy, terms) plus robots.ts/sitemap.ts —
+architecturally separated from a new (app) route group now holding
+login/register/onboarding/dashboard, so AuthProvider (and its token-
+refresh call) only ever runs for authenticated-app routes, never on a
+public page. Centralize branding, placeholder pricing, demo metadata, and
+canonical-domain/SEO helpers in frontend/src/lib/{brand,pricing,demos,
+seo}.ts, with an original geometric SVG brand mark.
+
+Add three real, fictional, user-less demo tenants (clinic, hotel, real
+estate) reusing the entire existing conversation/safety/widget stack
+unchanged, embedded via a sandboxed static page modeled on Phase 5's
+dashboard live-preview mechanism — each demo's traffic is classified as
+platform-preview by the same server-verified, Origin-header-based
+mechanism Phase 5/6 already built, so it never contaminates production
+analytics. Add a zero-cost, honeypot-and-rate-limited public lead-capture
+endpoint backed by a new global (not tenant-owned) public_leads model,
+with explicit contact/marketing consent separation and no public read
+endpoint.
+
+Fix a real Phase 4 bug found via this phase's own live demo testing:
+_bound_output's recursion-depth cutoff silently replaced every real
+business-hours value with None (app/ai/tools/base.py), never caught
+because no prior tenant's live testing populated real multi-level
+working-hours data. Fix a tablet-width header layout bug, a homepage
+heading-hierarchy gap, and an accessibility issue in the brand mark's SVG
+— the latter two found by a new automated axe-core accessibility test
+suite (vitest-axe).
+
+Fix the shared, deterministic response-composition layer
+(app/ai/providers/mock.py) two ways, for every tenant's qualification
+flow, not a per-demo text hack: acknowledgments now reference the
+actual captured value (type-aware — a select option's label, a quoted
+free-text answer, yes/no for booleans) instead of echoing a field's raw,
+sometimes question-phrased label; and a field-rejection note is now a
+single concise sentence, suppressed entirely on any turn where the same
+message also produced a real answer, rather than a mechanically
+concatenated, occasionally self-contradictory combination of both.
+
+Add 20 new backend composition tests (all field types plus the exact
+hotel/clinic scenarios end-to-end) on top of the original round's 20
+backend and 53 frontend tests; 464 backend and 185 frontend tests pass
+in full, including the unchanged Phase 4 multiconn suite.
+```
+
+**Awaiting explicit review and commit approval. Phase 8 has not been
 started.**

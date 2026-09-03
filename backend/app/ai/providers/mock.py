@@ -186,22 +186,76 @@ def _compose_answer(
     return None
 
 
+_MAX_ACKNOWLEDGED_VALUE_CHARS = 60
+
+
+def _format_captured_value(field: QualificationFieldSummary, value: object) -> str:
+    """Renders an already-validated, already-bounded captured value in
+    plain natural language for an acknowledgment sentence — never the
+    field's internal key or its (sometimes question-phrased) label. Every
+    branch reads only from data the caller already validated and stored;
+    nothing here invents or infers a value that wasn't actually captured."""
+    if field.type == "single_select" and field.options:
+        for option in field.options:
+            if option.get("value") == value:
+                return str(option.get("label", value))
+        return str(value)
+    if field.type == "multi_select" and field.options and isinstance(value, list):
+        label_by_value = {opt.get("value"): opt.get("label", opt.get("value")) for opt in field.options}
+        return ", ".join(str(label_by_value.get(v, v)) for v in value)
+    if field.type == "boolean":
+        return "yes" if value else "no"
+    text = str(value)
+    if len(text) > _MAX_ACKNOWLEDGED_VALUE_CHARS:
+        text = text[: _MAX_ACKNOWLEDGED_VALUE_CHARS - 1] + "…"
+    if field.type in ("short_text", "long_text"):
+        # Quoted, not bare — this is free text the visitor wrote, being
+        # echoed back inside another sentence. A bare echo of a
+        # full-sentence answer (which is always possible here: scoped
+        # extraction accepts any non-HTML text under the length cap for
+        # these two types, since there is no structured way to validate
+        # free text further) reads ambiguously and can visibly double up
+        # trailing punctuation ("...as noted that as done tomorrow.." with
+        # two periods); a single trailing sentence-ending mark is dropped
+        # before quoting so the surrounding sentence's own period is the
+        # only one that shows.
+        text = text.rstrip(".!?")
+        return f'"{text}"'
+    return text
+
+
+def _values_for(fields: list[QualificationFieldSummary], collected_data: dict) -> list[str]:
+    return [_format_captured_value(f, collected_data[f.key]) for f in fields if f.key in collected_data]
+
+
 def _acknowledgment(qualification: QualificationState) -> str | None:
+    """Acknowledges what was actually captured or corrected, by value —
+    never by echoing the field's internal key or label, which is what
+    previously produced a mechanical, sometimes-nonsensical echo (a
+    question-phrased label read back as if it were the answer). A
+    correction is phrased distinctly from a fresh capture, so a visitor
+    can tell an overwritten value was recognized as a change, not a new
+    answer."""
     notes: list[str] = []
-    if qualification.just_captured:
-        labels = ", ".join(field.label for field in qualification.just_captured)
-        notes.append(f"Got it — I've noted your {labels}.")
-    if qualification.just_corrected:
-        labels = ", ".join(field.label for field in qualification.just_corrected)
-        notes.append(f"Updated your {labels}.")
+    captured_values = _values_for(qualification.just_captured, qualification.collected_data)
+    if captured_values:
+        notes.append(f"Got it — I've noted that as {', '.join(captured_values)}.")
+    corrected_values = _values_for(qualification.just_corrected, qualification.collected_data)
+    if corrected_values:
+        notes.append(f"Thanks — I've updated that to {', '.join(corrected_values)}.")
     return " ".join(notes) if notes else None
 
 
 def _rejection_note(qualification: QualificationState) -> str | None:
+    """One concise, field-specific correction per rejection — `reason` is
+    already a complete, self-contained sentence (see
+    app/ai/qualification.py::extract_value_for_field), so this no longer
+    wraps it in a second, redundantly-phrased "that doesn't look like a
+    valid X" lead-in stacked on top of a reason that already says exactly
+    that in its own words."""
     if not qualification.just_rejected:
         return None
-    parts = [f"That doesn't look like a valid {r.field_label} — {r.reason}" for r in qualification.just_rejected]
-    return " ".join(parts)
+    return " ".join(r.reason for r in qualification.just_rejected)
 
 
 def _question_for_field(field: QualificationFieldSummary) -> str:
@@ -312,13 +366,21 @@ class MockProvider(AIProvider):
         if acknowledgment:
             parts.append(acknowledgment)
 
-        rejection = _rejection_note(context.qualification)
-        if rejection:
-            parts.append(rejection)
-
         answer = _compose_answer(latest_user_text, context.retrieved_sources, context.tool_results)
         if answer:
+            # A real, informational answer was found for this message —
+            # it was a genuine question, not an attempt at the pending
+            # qualification field, so a "that doesn't look like a valid
+            # X" correction right next to actually answering it would
+            # read as contradictory. Nothing was captured either way, so
+            # suppressing the note here does not hide a data-safety
+            # issue — the field simply stays pending and is asked again
+            # below, exactly as it would have been anyway.
             parts.append(answer)
+        else:
+            rejection = _rejection_note(context.qualification)
+            if rejection:
+                parts.append(rejection)
 
         if context.qualification.next_field is not None:
             parts.append(_question_for_field(context.qualification.next_field))
