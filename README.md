@@ -5,29 +5,32 @@ industry templates (real estate, clinics, hotels, restaurants, automotive,
 law firms, education, home services, SaaS, custom) configure it via data,
 not forked code.
 
-Status: **Phase 8 — a secure integration foundation (versioned event
-envelope/connectors/transactional outbox/delivery worker, SSRF-guarded
-webhook delivery, encrypted secrets, a narrow authenticated inbound API)
-connecting to Revenue Brain and a future AI Sales Employee product,
-without importing from or coupling to either — on top of Phase 7's public
-marketing website (Next.js route group, centralized branding/pricing/SEO
-configuration) and three interactive industry demos (clinic, hotel, real
-estate) embedding the real public widget against dedicated fictional
-tenants, plus a zero-cost public lead-capture endpoint, itself on top of
-Phase 6's client operations dashboard: real analytics,
-conversation/contact/enquiry/appointment/handoff management, internal
-notes, an audit log, role-based permissions, and CSV export, itself on
-top of Phase 5's public embeddable website widget, browser voice, secure
-public conversations, contact capture, appointment requests, human
-handoff, and installation management**. The Phase 8 backend (API,
-worker, CLI), its dashboard frontend UI (`/dashboard/integrations/*`,
-including a zero-network integration lab and tenant-scoped
-health/observability), and an explicit CLI-only producer for stale-
-conversation abandonment are all complete and tested. See
-[docs/PROGRESS.md](docs/PROGRESS.md) for what's implemented so far,
-[docs/architecture.md](docs/architecture.md) for the system design, and
-[docs/security.md](docs/security.md) for the auth/tenant-isolation/public-widget
-threat model.
+Status: **Phase 9 — a final security/accessibility/responsive/production-
+readiness audit** across every Phase 1–8 surface (see
+docs/PROGRESS.md's Phase 9 section for the full report: five parallel
+security-research passes finding no exploitable vulnerability in existing
+code, five genuine gaps fixed — including wiring up widget visitor-session
+revocation and two dialog-focus-restoration fixes — 29 new regression
+tests, a dependency-advisory review, and live end-to-end browser
+verification), on top of **Phase 8 — a secure integration foundation
+(versioned event envelope/connectors/transactional outbox/delivery
+worker, SSRF-guarded webhook delivery, encrypted secrets, a narrow
+authenticated inbound API) connecting to Revenue Brain and a future AI
+Sales Employee product, without importing from or coupling to either —
+on top of Phase 7's public marketing website (Next.js route group,
+centralized branding/pricing/SEO configuration) and three interactive
+industry demos (clinic, hotel, real estate) embedding the real public
+widget against dedicated fictional tenants, plus a zero-cost public
+lead-capture endpoint, itself on top of Phase 6's client operations
+dashboard: real analytics, conversation/contact/enquiry/appointment/
+handoff management, internal notes, an audit log, role-based
+permissions, and CSV export, itself on top of Phase 5's public
+embeddable website widget, browser voice, secure public conversations,
+contact capture, appointment requests, human handoff, and installation
+management**. See [docs/PROGRESS.md](docs/PROGRESS.md) for what's
+implemented so far, [docs/architecture.md](docs/architecture.md) for the
+system design, and [docs/security.md](docs/security.md) for the
+auth/tenant-isolation/public-widget threat model.
 
 ## Stack
 

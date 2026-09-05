@@ -1,4 +1,24 @@
+import pytest
+from app.config import Settings
 from fastapi.testclient import TestClient
+
+
+def test_wildcard_cors_origin_is_rejected_at_config_load():
+    """Phase 9 hardening: `app.main` always pairs `cors_origins_list` with
+    `allow_credentials=True`, so a `*` origin must never reach
+    CORSMiddleware even if an operator misconfigures the environment
+    variable — this should fail loudly at settings-access time rather than
+    relying solely on browsers to refuse the wildcard-plus-credentials
+    combination."""
+    settings = Settings(cors_allow_origins="*")
+    with pytest.raises(RuntimeError, match="CORS_ALLOW_ORIGINS"):
+        _ = settings.cors_origins_list
+
+
+def test_wildcard_mixed_with_real_origins_is_still_rejected():
+    settings = Settings(cors_allow_origins="http://localhost:3000,*")
+    with pytest.raises(RuntimeError, match="CORS_ALLOW_ORIGINS"):
+        _ = settings.cors_origins_list
 
 
 def test_allowed_origin_gets_cors_header(client: TestClient):

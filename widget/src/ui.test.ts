@@ -109,6 +109,28 @@ describe("Widget mount", () => {
 
     expect(host.shadowRoot!.querySelector(".mic-button")).toBeNull();
   });
+
+  it("restores focus to the launcher button when the panel is closed", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(baseConfig));
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ token: "tok", conversation_id: "conv-1", expires_at: "2099-01-01T00:00:00Z" }, 201)
+    );
+    fetchMock.mockResolvedValueOnce(sseResponse([{ event: "response.completed", data: { content: "Hi!" } }]));
+    const host = makeHost();
+    const widget = new Widget({ publicId: "pub-1", apiBaseUrl: "http://localhost:8000" }, host);
+    await widget.mount();
+
+    const shadow = host.shadowRoot!;
+    const launcher = shadow.querySelector(".launcher") as HTMLButtonElement;
+    launcher.click(); // open
+    await Promise.resolve();
+    await Promise.resolve();
+
+    launcher.click(); // close
+    await Promise.resolve();
+
+    expect(shadow.activeElement).toBe(launcher);
+  });
 });
 
 describe("Widget conversation flow", () => {

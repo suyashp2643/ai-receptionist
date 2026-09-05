@@ -330,6 +330,20 @@ def claim_handoff(
     ctx: TenantContext = Depends(get_tenant_context),
     db: Session = Depends(get_db),
 ) -> HandoffDetailResponse:
+    """Phase 9 audit fix: every other action on this surface (get, update
+    status) explicitly checks tenant scoping first and returns a clean 404
+    for a handoff that doesn't belong to the caller's tenant — this route
+    previously skipped that check and let `human_handoff_service.claim()`'s
+    atomic UPDATE silently match zero rows for that case too, collapsing it
+    into the same 409 used for "already claimed by a teammate". Not a
+    cross-tenant data leak (the UPDATE's own WHERE clause was always
+    tenant-scoped, so nothing could ever actually be claimed), but
+    inconsistent with this codebase's stated convention that a non-existent
+    or foreign-tenant resource ID gets 404, not a status conflated with a
+    same-tenant business conflict."""
+    handoff = HumanHandoffRepository(db, ctx.tenant_id).get(handoff_id)
+    if handoff is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Handoff not found")
     try:
         handoff = human_handoff_service.claim(
             db, tenant_id=ctx.tenant_id, actor_user_id=ctx.user_id, handoff_id=handoff_id

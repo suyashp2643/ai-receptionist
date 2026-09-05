@@ -146,6 +146,33 @@ class TestEnquiryStatusUpdate:
         )
         assert response.status_code == 200
 
+    def test_cross_tenant_enquiry_is_404_for_get_and_update(
+        self, db_backed_client: TestClient, db_session: Session
+    ):
+        """Phase 9 audit finding: enquiries had no dedicated cross-tenant
+        HTTP regression test, relying entirely on the shared
+        TenantScopedRepository guarantee with no test of its own."""
+        tenant_a, owner_a, _ = make_tenant_with_owner(db_session, tenant_name="A")
+        tenant_b, _, _ = make_tenant_with_owner(db_session, tenant_name="B")
+        receptionist_b, _ = make_receptionist(db_session, tenant=tenant_b)
+        conv_b = _make_conversation(db_session, tenant_id=tenant_b.id, receptionist_id=receptionist_b.id)
+        enquiry_b = self._make_enquiry(db_session, tenant_b, receptionist_b, conv_b)
+
+        get_response = db_backed_client.get(
+            f"/api/v1/tenants/{tenant_a.id}/enquiries/{enquiry_b.id}", headers=_auth_headers(owner_a)
+        )
+        assert get_response.status_code == 404
+
+        patch_response = db_backed_client.patch(
+            f"/api/v1/tenants/{tenant_a.id}/enquiries/{enquiry_b.id}/status",
+            json={"status": "qualified", "expected_version": 1},
+            headers=_auth_headers(owner_a),
+        )
+        assert patch_response.status_code == 404
+
+        db_session.refresh(enquiry_b)
+        assert enquiry_b.status == EnquiryStatus.NEW
+
 
 class TestAppointmentStatusUpdate:
     def _make_appointment(self, db, tenant, receptionist, conv, status=AppointmentRequestStatus.PENDING):
@@ -202,6 +229,32 @@ class TestAppointmentStatusUpdate:
             headers=_auth_headers(owner),
         )
         assert response.status_code == 422
+
+    def test_cross_tenant_appointment_is_404_for_get_and_update(
+        self, db_backed_client: TestClient, db_session: Session
+    ):
+        """Phase 9 audit finding: appointments had no dedicated cross-tenant
+        HTTP regression test."""
+        tenant_a, owner_a, _ = make_tenant_with_owner(db_session, tenant_name="A")
+        tenant_b, _, _ = make_tenant_with_owner(db_session, tenant_name="B")
+        receptionist_b, _ = make_receptionist(db_session, tenant=tenant_b)
+        conv_b = _make_conversation(db_session, tenant_id=tenant_b.id, receptionist_id=receptionist_b.id)
+        appt_b = self._make_appointment(db_session, tenant_b, receptionist_b, conv_b)
+
+        get_response = db_backed_client.get(
+            f"/api/v1/tenants/{tenant_a.id}/appointments/{appt_b.id}", headers=_auth_headers(owner_a)
+        )
+        assert get_response.status_code == 404
+
+        patch_response = db_backed_client.patch(
+            f"/api/v1/tenants/{tenant_a.id}/appointments/{appt_b.id}/status",
+            json={"status": "confirmed", "expected_version": 1},
+            headers=_auth_headers(owner_a),
+        )
+        assert patch_response.status_code == 404
+
+        db_session.refresh(appt_b)
+        assert appt_b.status == AppointmentRequestStatus.PENDING
 
 
 class TestHandoffClaimAndStatus:
@@ -313,3 +366,35 @@ class TestHandoffClaimAndStatus:
         )
         assert response.status_code == 200
         assert response.json()["is_clinic_emergency"] is True
+
+    def test_cross_tenant_handoff_is_404_for_get_claim_and_update(
+        self, db_backed_client: TestClient, db_session: Session
+    ):
+        """Phase 9 audit finding: handoffs had no dedicated cross-tenant
+        HTTP regression test — only claim-conflict tests existed."""
+        tenant_a, owner_a, _ = make_tenant_with_owner(db_session, tenant_name="A")
+        tenant_b, _, _ = make_tenant_with_owner(db_session, tenant_name="B")
+        receptionist_b, _ = make_receptionist(db_session, tenant=tenant_b)
+        conv_b = _make_conversation(db_session, tenant_id=tenant_b.id, receptionist_id=receptionist_b.id)
+        handoff_b = self._make_handoff(db_session, tenant_b, receptionist_b, conv_b)
+
+        get_response = db_backed_client.get(
+            f"/api/v1/tenants/{tenant_a.id}/handoffs/{handoff_b.id}", headers=_auth_headers(owner_a)
+        )
+        assert get_response.status_code == 404
+
+        claim_response = db_backed_client.post(
+            f"/api/v1/tenants/{tenant_a.id}/handoffs/{handoff_b.id}/claim", headers=_auth_headers(owner_a)
+        )
+        assert claim_response.status_code == 404
+
+        patch_response = db_backed_client.patch(
+            f"/api/v1/tenants/{tenant_a.id}/handoffs/{handoff_b.id}/status",
+            json={"status": "cancelled", "expected_version": 1},
+            headers=_auth_headers(owner_a),
+        )
+        assert patch_response.status_code == 404
+
+        db_session.refresh(handoff_b)
+        assert handoff_b.status == HandoffStatus.OPEN
+        assert handoff_b.assigned_user_id is None

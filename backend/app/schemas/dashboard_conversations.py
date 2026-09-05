@@ -65,6 +65,23 @@ class ConversationDetailHandoff(BaseModel):
     status: str
 
 
+class ConversationDetailWidgetSession(BaseModel):
+    """Never includes `token_hash` — the dashboard has no legitimate reason
+    to see even the hash of a visitor's capability token, only whether one
+    exists and its current lifecycle state, so an operator can decide
+    whether "Revoke session" is meaningful to show at all."""
+
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    is_revoked: bool
+    expires_at: datetime
+
+
+class WidgetSessionRevokeResponse(BaseModel):
+    status: str
+    revoked_at: datetime
+
+
 class ConversationDashboardDetailResponse(BaseModel):
     id: uuid.UUID
     receptionist_id: uuid.UUID
@@ -88,6 +105,7 @@ class ConversationDashboardDetailResponse(BaseModel):
     enquiry: ConversationDetailEnquiry | None
     appointment_requests: list[ConversationDetailAppointment]
     handoffs: list[ConversationDetailHandoff]
+    widget_session: ConversationDetailWidgetSession | None
 
 
 CONVERSATION_SORT_ALLOWLIST = frozenset({"started_at", "last_message_at"})

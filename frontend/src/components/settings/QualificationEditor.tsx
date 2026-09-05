@@ -155,24 +155,24 @@ export function QualificationEditor({ tenantId, canEdit }: { tenantId: string; c
           const fieldError = fieldErrors[index];
           return (
             <li key={index} className="rounded border border-black/10 dark:border-white/15 p-3 flex flex-col gap-2">
-              <div className="flex gap-2">
-                <label className="flex-1 flex flex-col gap-1 text-xs text-neutral-500">
+              <div className="flex flex-wrap gap-2">
+                <label className="flex-1 min-w-0 flex flex-col gap-1 text-xs text-neutral-500">
                   Label
                   <input
                     disabled={!canEdit}
                     value={field.label}
                     onChange={(e) => updateField(index, { label: e.target.value })}
-                    className={inputClass}
+                    className={`${inputClass} w-full`}
                     aria-label={`Label for field ${field.key}`}
                   />
                 </label>
-                <label className="flex flex-col gap-1 text-xs text-neutral-500">
+                <label className="flex-1 min-w-0 flex flex-col gap-1 text-xs text-neutral-500">
                   Type
                   <select
                     disabled={!canEdit}
                     value={field.type}
                     onChange={(e) => handleTypeChange(index, e.target.value)}
-                    className={inputClass}
+                    className={`${inputClass} w-full`}
                     aria-label={`Type for field ${field.key}`}
                   >
                     {QUALIFICATION_FIELD_TYPES.map((t) => (
@@ -184,7 +184,7 @@ export function QualificationEditor({ tenantId, canEdit }: { tenantId: string; c
                 </label>
               </div>
 
-              <div className="flex items-center gap-3 text-sm">
+              <div className="flex flex-wrap items-center gap-3 text-sm">
                 <label className="flex items-center gap-1">
                   <input
                     type="checkbox"
@@ -194,9 +194,9 @@ export function QualificationEditor({ tenantId, canEdit }: { tenantId: string; c
                   />
                   Required
                 </label>
-                <span className="text-neutral-500 text-xs">key: {field.key}</span>
+                <span className="text-neutral-500 text-xs break-all">key: {field.key}</span>
                 {canEdit && (
-                  <div className="ml-auto flex gap-2">
+                  <div className="ml-auto flex flex-wrap gap-2">
                     <button
                       type="button"
                       onClick={() => moveField(index, -1)}

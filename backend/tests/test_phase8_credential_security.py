@@ -253,3 +253,62 @@ class TestDuplicateInboundRequestProducesNoDuplicateSideEffect:
             )
         ).all()
         assert len(activity_rows) == 1
+
+
+class TestUnknownApiKeyTimingNormalization:
+    """Phase 9 audit finding: an unknown API key used to fail faster than a
+    known key with a bad signature (which additionally pays for a Fernet
+    decrypt + HMAC verification), a weak timing oracle for key enumeration.
+    `_fail_like_a_known_key_with_a_bad_signature` closes that gap by doing
+    equivalent work before the same generic failure — these tests prove it
+    never changes the outward result and never itself raises, regardless of
+    whether an encryption key happens to be configured."""
+
+    def test_helper_never_raises_when_encryption_key_is_configured(self):
+        from app.services.integration_inbound_service import _fail_like_a_known_key_with_a_bad_signature
+
+        _fail_like_a_known_key_with_a_bad_signature(
+            settings,
+            signature="not-a-real-signature",
+            raw_body=b'{"irrelevant": true}',
+            timestamp=str(int(time.time())),
+            event_id_for_signature="evt-timing-test",
+            event_version=1,
+        )  # must not raise
+
+    def test_helper_never_raises_when_no_encryption_key_is_configured(self):
+        from app.services.integration_inbound_service import _fail_like_a_known_key_with_a_bad_signature
+
+        settings_without_key = Settings(integration_encryption_key=None)
+        _fail_like_a_known_key_with_a_bad_signature(
+            settings_without_key,
+            signature="not-a-real-signature",
+            raw_body=b'{"irrelevant": true}',
+            timestamp=str(int(time.time())),
+            event_id_for_signature="evt-timing-test",
+            event_version=1,
+        )  # must not raise
+
+    def test_unknown_key_still_returns_401(self, db_backed_client: TestClient, db_session: Session):
+        """Behavioral regression guard, complementing the direct unit tests
+        above: the outward result for an unknown key is unchanged by the
+        extra dummy work (see also test_phase8_integrations_inbound_api.py's
+        own test_unknown_api_key_is_401, which already covered this before
+        this timing fix — this just re-confirms it post-fix, right next to
+        the timing-specific tests, in case one is ever run in isolation)."""
+        from app.services.integration_inbound_service import (
+            InboundAuthError,
+            _authenticate,
+        )
+
+        with pytest.raises(InboundAuthError):
+            _authenticate(
+                db_session,
+                raw_api_key="airk_totally-made-up-key",
+                signature="whatever",
+                timestamp=str(int(time.time())),
+                raw_body=b'{"irrelevant": true}',
+                event_id_for_signature="evt-timing-test",
+                event_version=1,
+                settings=settings,
+            )

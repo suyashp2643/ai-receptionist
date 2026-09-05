@@ -321,6 +321,15 @@ export class Widget {
       this.recognizer.abort();
       this.isListening = false;
       this.speaker.cancel();
+      // Without this, closing the panel (via the close button or Escape)
+      // left focus on the now-hidden composer textarea — invisible to a
+      // sighted keyboard user and unreachable by a screen reader, since a
+      // `hidden` ancestor removes it from the accessibility tree. Restoring
+      // focus to the launcher mirrors the panel's own entry behavior
+      // (focus moves to the composer on open) and matches this codebase's
+      // dialog-focus-restoration convention elsewhere (see
+      // frontend/src/components/dashboard/ConfirmDialog.tsx).
+      this.launcherButton.focus();
     }
   }
 

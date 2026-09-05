@@ -919,3 +919,23 @@ conflict (`app/services/integration_inbound_service.py`).
   list, create, per-connection configuration, delivery history with
   dead-letter replay, and a zero-network integration lab — on top of the
   backend API (`docs/api.md`'s "Integrations management" section).
+
+## Phase 9
+
+No schema change. The migration head is unchanged at `ee559f240268`
+(`alembic check` reports no drift before or after this phase). Phase 9's
+one new route (`POST .../conversations/{id}/revoke-widget-session`) reads
+and writes only existing columns on the existing `widget_visitor_sessions`
+table (`revoked_at`) — see docs/architecture.md's Phase 9 section.
+
+**Round 2**: a full hand-reviewed downgrade→upgrade round trip was
+performed against `ai_receptionist_dev` (`alembic downgrade -1` →
+`161846266d69`, confirmed via `information_schema.tables` that all four
+Phase 8 integration tables were genuinely dropped along with their six
+Postgres enum types, matching that revision's `downgrade()` exactly →
+`alembic upgrade head` → back to `ee559f240268` → `alembic check`: no
+drift). Performed only after confirming every Phase 8 integration table
+was empty database-wide (not just for the round's own test tenant), so no
+real data was at risk. The 7 pre-existing tenants were confirmed
+unchanged immediately afterward. Still no schema change — the round trip
+exercises the *existing* migration, it doesn't add a new one.

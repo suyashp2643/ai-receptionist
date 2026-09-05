@@ -5,11 +5,11 @@ import { useEffect, useRef } from "react";
 /** A small, accessible confirmation dialog — `role="alertdialog"` (not a
  * generic dialog, since every use of this component is a yes/no decision
  * about a real action), auto-focuses the cancel button by default (never
- * the destructive action), traps Escape to cancel, and disables
- * background scroll while open. Kept intentionally simple: no focus trap
- * across all elements (only two buttons ever exist in the dialog body),
- * no portal — a fixed-position overlay is sufficient for this app's
- * layout depth. */
+ * the destructive action), traps Escape to cancel, keeps Tab cycling
+ * between its two buttons only (a keyboard user can never tab out to
+ * whatever is behind the overlay), disables background scroll while
+ * open, and restores focus to whatever triggered it on close. No portal —
+ * a fixed-position overlay is sufficient for this app's layout depth. */
 export function ConfirmDialog({
   open,
   title,
@@ -32,15 +32,40 @@ export function ConfirmDialog({
   onCancel: () => void;
 }) {
   const cancelRef = useRef<HTMLButtonElement>(null);
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  const previouslyFocusedRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (!open) return;
+    previouslyFocusedRef.current = document.activeElement as HTMLElement | null;
     cancelRef.current?.focus();
+
     function onKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") onCancel();
+      if (e.key === "Escape") {
+        onCancel();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      // Only two focusable elements ever exist in this dialog's body, so a
+      // full roving-tabindex trap would be overkill — cycling between
+      // exactly these two refs keeps Tab (and Shift+Tab) from ever
+      // reaching whatever is behind the overlay.
+      const first = cancelRef.current;
+      const last = confirmRef.current;
+      if (!first || !last) return;
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
     }
     document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      previouslyFocusedRef.current?.focus();
+    };
   }, [open, onCancel]);
 
   if (!open) return null;
@@ -72,6 +97,7 @@ export function ConfirmDialog({
             {cancelLabel}
           </button>
           <button
+            ref={confirmRef}
             type="button"
             onClick={onConfirm}
             disabled={busy}

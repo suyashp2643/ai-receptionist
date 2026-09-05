@@ -15,11 +15,11 @@ from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import TenantContext, get_db, get_tenant_context
+from app.api.deps import TenantContext, get_db, get_tenant_context, require_tenant_role
 from app.api.v1.conversations import _get_conversation_or_404
 from app.core.conversation_source import ConversationSource, classify
 from app.core.dashboard_dates import day_bounds_utc, get_tenant_timezone
-from app.models.enums import ConversationStatus
+from app.models.enums import ConversationStatus, TenantMemberRole
 from app.repositories.appointment_request import AppointmentRequestRepository
 from app.repositories.contact import ContactRepository
 from app.repositories.conversation import (
@@ -39,9 +39,12 @@ from app.schemas.dashboard_conversations import (
     ConversationDetailContact,
     ConversationDetailEnquiry,
     ConversationDetailHandoff,
+    ConversationDetailWidgetSession,
     ConversationListItem,
     ConversationListResponse,
+    WidgetSessionRevokeResponse,
 )
+from app.services import activity_service, widget_visitor_session_service
 
 router = APIRouter()
 
@@ -164,4 +167,52 @@ def get_conversation_detail(
             for a in appointments
         ],
         handoffs=[ConversationDetailHandoff(id=h.id, status=h.status.value) for h in handoffs],
+        widget_session=(
+            ConversationDetailWidgetSession(
+                id=session.id,
+                is_revoked=session.revoked_at is not None,
+                expires_at=session.expires_at,
+            )
+            if session
+            else None
+        ),
     )
+
+
+@router.post(
+    "/tenants/{tenant_id}/conversations/{conversation_id}/revoke-widget-session",
+    response_model=WidgetSessionRevokeResponse,
+)
+def revoke_conversation_widget_session(
+    conversation_id: uuid.UUID,
+    ctx: TenantContext = Depends(require_tenant_role(TenantMemberRole.ADMIN)),
+    db: Session = Depends(get_db),
+) -> WidgetSessionRevokeResponse:
+    """Immediately invalidates the one visitor capability token scoped to
+    this conversation, without touching the wider widget installation (see
+    app/services/widget_visitor_session_service.revoke_session — previously
+    unwired to any route; this closes that gap). Idempotent: revoking an
+    already-revoked session is a harmless no-op, not an error, matching this
+    codebase's convention of not treating a repeated safe action as a
+    failure (e.g. handoff/appointment idempotency keys)."""
+    conversation = _get_conversation_or_404(conversation_id, ctx, db)
+    session = WidgetVisitorSessionRepository(db, ctx.tenant_id).get_by_conversation_id(conversation.id)
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No widget visitor session exists for this conversation.",
+        )
+    if session.revoked_at is None:
+        widget_visitor_session_service.revoke_session(session)
+        activity_service.record(
+            db,
+            tenant_id=ctx.tenant_id,
+            actor_user_id=ctx.user_id,
+            action_type="widget_session.revoked",
+            entity_type="conversation",
+            entity_id=conversation.id,
+            metadata={},
+        )
+    db.commit()
+    assert session.revoked_at is not None
+    return WidgetSessionRevokeResponse(status="revoked", revoked_at=session.revoked_at)

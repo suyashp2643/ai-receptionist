@@ -479,3 +479,38 @@ cd backend
 .venv/bin/python -m pytest -k phase8 -q                    # everything Phase 8, including multiconn
 .venv/bin/python -m pytest -k phase8 -m "not multiconn" -q  # Phase 8, excluding the real-DB concurrency suite
 ```
+
+## 7. Dependency-advisory scan (Phase 9)
+
+Not a project dependency — install, run, then remove:
+
+```bash
+cd backend
+source .venv/bin/activate
+pip install pip-audit
+python -m pip_audit          # audits what's actually installed in this venv
+pip uninstall -y pip-audit   # and its own transitive deps (see `pip show pip-audit`
+                              # for the exact list, or just `pip freeze` before/after)
+```
+
+`npm audit` needs no install — run it directly in `frontend/` and `widget/`.
+See docs/security.md's "Dependency advisories" section for the current
+findings — some applied (backend: `PyJWT`, `python-dotenv`; frontend:
+`postcss`, via an `overrides` entry in `frontend/package.json` rather than
+a Next.js version change), some deliberately deferred with an explicit
+blocker each (never auto-fixed with `--force`, and no forced major-version
+upgrade).
+
+**Reproducing the frontend `postcss` fix** (a targeted patch to the one
+vulnerable copy nested inside `next`'s own `node_modules`, not a Next.js
+upgrade):
+
+```json
+// frontend/package.json
+"overrides": {
+  "next": { "postcss": "8.5.28" }
+}
+```
+
+then `npm install` in `frontend/` and confirm with `npm audit`
+(0 vulnerabilities expected) and `npm run build`.

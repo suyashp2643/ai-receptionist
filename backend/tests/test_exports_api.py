@@ -106,6 +106,26 @@ class TestExportEndpoint:
         )
         assert response.status_code in (404, 422)
 
+    def test_export_never_includes_another_tenants_rows(self, db_backed_client: TestClient, db_session: Session):
+        """Phase 9 audit finding: this admin-only, PII-bearing surface had
+        no test proving Tenant A cannot download Tenant B's rows via its
+        own export endpoint."""
+        tenant_a, owner_a, _ = make_tenant_with_owner(db_session, tenant_name="Tenant A")
+        tenant_b, _, _ = make_tenant_with_owner(db_session, tenant_name="Tenant B")
+        db_session.add(Contact(tenant_id=tenant_a.id, name="Tenant A Contact", normalized_email="a@example.com"))
+        db_session.add(Contact(tenant_id=tenant_b.id, name="Tenant B Contact", normalized_email="b@example.com"))
+        db_session.flush()
+
+        response = db_backed_client.get(
+            f"/api/v1/tenants/{tenant_a.id}/exports/contacts",
+            params={"date_from": "2026-01-01", "date_to": "2026-12-31"},
+            headers=_auth_headers(owner_a),
+        )
+        assert response.status_code == 200
+        assert "Tenant A Contact" in response.text
+        assert "Tenant B Contact" not in response.text
+        assert "b@example.com" not in response.text
+
     def test_export_records_an_activity_event(self, db_backed_client: TestClient, db_session: Session):
         tenant, owner, _ = make_tenant_with_owner(db_session)
         db_backed_client.get(

@@ -1213,3 +1213,234 @@ session or held lock on `integration_outbox_events` afterward, using the
 same `pg_stat_activity`/`pg_locks` introspection helpers this document's
 Phase 4 concurrency section already established as this codebase's
 standard for proving a concurrency claim rather than merely asserting it.
+
+## Phase 9 — security/accessibility/production-readiness audit
+
+A systematic re-review of every Phase 1–8 surface: authentication, tenant
+isolation, permission enforcement, the public widget, integrations/SSRF, AI
+safety, generic web vulnerabilities, dependency advisories, accessibility,
+and responsive/production-readiness posture. Five independent, parallel
+research passes covered auth/session, tenant isolation, SSRF/integrations/
+widget, generic vulnerabilities/secrets, and AI safety/prompt injection —
+each instructed to cite exact `file:line` evidence rather than assert. The
+result: **no exploitable vulnerability was found in existing Phase 1–8
+code** — the base was already well-hardened and well-tested (see this
+file's Phase 1–8 sections above). What Phase 9 found was a small number of
+genuine gaps, all fixed below, and a larger set of missing regression tests
+for behavior that was already correctly implemented but unverified by CI.
+
+### Fixes (real gaps found and closed)
+
+1. **Widget visitor-session revocation was unreachable.**
+   `app/services/widget_visitor_session_service.revoke_session` existed
+   (presumably scaffolded for this purpose) but no route ever called it —
+   the only way to invalidate a single visitor's capability token was to
+   revoke the entire `WidgetInstallation`, forcing every other visitor to
+   re-embed. Added `POST .../conversations/{id}/revoke-widget-session`
+   (admin/owner only, tenant-scoped, idempotent) — see docs/api.md. Verified
+   live: after revoking via this endpoint, the visitor's still-held raw
+   capability token gets a `401` from the public widget API on its very
+   next request, not just a dashboard-side flag flip. The conversation
+   detail response also now surfaces `widget_session: {id, is_revoked,
+   expires_at} | null` (never the token or its hash) so the dashboard can
+   show a "Revoke session" action only when one exists and isn't already
+   revoked. Regression tests: `tests/test_dashboard_conversations_api.py`
+   (`TestRevokeWidgetSession`), plus a frontend test for the UI wiring.
+
+2. **CORS wildcard had no server-side guard.** `app.main` always pairs
+   `CORS_ALLOW_ORIGINS` with `allow_credentials=True`; browsers already
+   refuse a literal `*` origin combined with credentials, but that
+   protection lived only in the browser, not this server — a
+   misconfigured `CORS_ALLOW_ORIGINS=*` in a future deployment would have
+   silently relied on every client's own CORS enforcement being correct.
+   `Settings.cors_origins_list` now raises `RuntimeError` at
+   settings-access time if `*` appears anywhere in the configured list.
+   Tests: `tests/test_cors.py`.
+
+3. **Inbound integration auth had a timing side-channel.** An unknown API
+   key failed faster than a known key with a bad signature (which
+   additionally pays for a Fernet decrypt + HMAC verification) — a weak
+   but real timing oracle for probing which API keys exist. Added
+   `_fail_like_a_known_key_with_a_bad_signature`
+   (`app/services/integration_inbound_service.py`), which burns the same
+   shape of work (a real encrypt/decrypt round trip plus an HMAC
+   verification against a fixed dummy secret) before the identical `401`,
+   mirroring `app/core/security.run_dummy_password_verification`'s existing
+   rationale for login. Never changes the outward result — only its
+   timing profile. Tests: `tests/test_phase8_credential_security.py`
+   (`TestUnknownApiKeyTimingNormalization`).
+
+4. **Handoff `claim` skipped the tenant-existence check every sibling
+   route already did.** `get_handoff_detail` and `update_handoff_status`
+   both look up the handoff via the tenant-scoped repository first and
+   return a clean `404` if it doesn't belong to the caller's tenant —
+   `claim_handoff` instead went straight to
+   `human_handoff_service.claim()`, whose atomic `UPDATE` silently matched
+   zero rows for a foreign-tenant (or entirely nonexistent) handoff id,
+   producing the same `409 "This handoff is no longer open"` used for a
+   genuine same-tenant claim race. Not a cross-tenant *mutation* risk (the
+   `UPDATE`'s own `WHERE` clause was always tenant-scoped, so nothing could
+   ever actually be claimed) — but it broke this codebase's own stated
+   invariant that a foreign-tenant resource id gets `404`, never a status
+   conflated with a real business conflict. Fixed by adding the same
+   existence check the other two routes already have, before calling
+   `claim()`. Test: `tests/test_dashboard_records_api.py`
+   (`test_cross_tenant_handoff_is_404_for_get_claim_and_update`).
+
+5. **Dialog/panel focus restoration was missing in two places.**
+   `ConfirmDialog` (frontend) and the embeddable widget's chat panel
+   (`widget/src/ui.ts`) both moved focus *into* themselves on open but
+   never moved it back to the triggering control on close — a keyboard or
+   screen-reader user closing either lost their place, since a
+   `hidden`/removed element retaining focus is invisible and
+   unreachable by Tab. `ConfirmDialog` now also traps Tab between its two
+   buttons (it previously relied only on there being nothing else on the
+   page to tab to, which is fragile). Both restore focus to the
+   opening control (the element that had focus before the dialog opened,
+   and the launcher button, respectively) on Escape/close. Tests:
+   `frontend/src/components/dashboard/ConfirmDialog.test.tsx`,
+   `widget/src/ui.test.ts`.
+
+None of the above weakens any existing check — every fix either adds a
+missing check (widget revocation, handoff 404), adds a defense-in-depth
+guard (CORS wildcard), closes a timing side-channel without changing any
+authorization decision, or fixes an accessibility regression with no
+security implication.
+
+### Regression tests added for already-correct behavior
+
+The tenant-isolation and AI-safety audit passes independently confirmed
+**no actual cross-tenant data leak (IDOR) exists anywhere** — every route
+correctly uses `TenantScopedRepository` or an equivalent explicit
+`tenant_id` filter. The gap was purely in test coverage: several surfaces
+had no regression test that would catch a future refactor accidentally
+dropping a `tenant_id` filter. Added:
+
+- **Widget installations** (`tests/test_widget_public_api.py`): the one
+  surface with *zero* prior cross-tenant coverage — a member of Tenant A
+  presenting a real Tenant B `installation_id` via Tenant A's own URL now
+  has an explicit `404` test for get/update/pause/revoke, plus
+  confirmation the target row was genuinely untouched.
+- **Integration connections** (`tests/test_phase8_integrations_api.py`):
+  prior coverage only proved a *non-member* of a tenant gets `404`; added
+  the stronger IDOR case — a genuine member of Tenant A, using Tenant A's
+  own membership and URL, reusing Tenant B's real `connection_id` — for
+  get/update/pause/deliveries/rotate-secret.
+- **Enquiries, appointments, handoffs**
+  (`tests/test_dashboard_records_api.py`): each sibling of contacts (which
+  already had its own cross-tenant test) now has an explicit get+update
+  cross-tenant `404` test, plus confirmation the record was not mutated.
+- **CSV exports** (`tests/test_exports_api.py`): an admin-only, PII-bearing
+  surface with no prior test proving Tenant A's export never contains
+  Tenant B's rows.
+- **Analytics** (new file `tests/test_analytics_api.py`): the existing
+  `tests/test_analytics_service.py` calls the service layer directly,
+  bypassing `get_tenant_context` entirely — there was no HTTP-level test
+  for non-member/cross-tenant access on `/analytics/overview` or
+  `/timeseries` at all.
+- **Cookie attributes** (`tests/test_auth.py`): prior tests asserted only
+  `Path` (via the raw `Set-Cookie` header). Added assertions for
+  `HttpOnly` and `SameSite` on both auth cookies, and `Secure` against
+  `settings.resolved_cookie_secure` (correctly `False` in this
+  `development`-environment test run, not hardcoded `True`).
+- **Prompt injection through retrieved content, end to end**
+  (`tests/test_conversations_api.py`): unit-level tests already proved
+  `app/ai/system_instructions.py` and `app/ai/retrieval.py` keep injected
+  text inert; added one that sends a real message through the full
+  `submit_message` pipeline against an FAQ whose *answer* (tenant-authored,
+  not attacker-controlled) contains an injection-shaped phrase, and
+  confirms the safety engine's `injection_attempt` label — which scans the
+  *visitor's own message*, not retrieved content — correctly does not
+  fire on it.
+
+### Accepted, documented residual gaps (not fixed — tracked for a future phase)
+
+- **Rate limiting remains in-memory/single-process**
+  (`app/core/rate_limit.py`) — already documented above; a multi-worker
+  production deployment multiplies every configured limit by the worker
+  count. The `RateLimiter` Protocol is already shaped for a Redis-backed
+  implementation; writing one is out of scope for a zero-cost phase.
+- **SSRF encoded-IP-form tests mock the resolver** rather than proving the
+  real OS resolver accepts decimal/octal/hex loopback forms the way the
+  guard's range-check logic assumes — the range-check itself is
+  thoroughly proven; the resolver-behavior assumption is not
+  independently verified at test time.
+- **No dedicated multicast-range SSRF test** exists by name (only
+  reserved/private/loopback/mapped are named explicitly) — functionally
+  covered by the same `_is_forbidden_ip` code path, just untested by name.
+- **No orchestrator-level test forces a disallowed/cross-tenant tool call**
+  via injected message content through `submit_message` — only the
+  unit-level `execute_tool` allow-list rejection is tested. Given the mock
+  provider's tool selection is purely keyword-based (never influenced by
+  message content beyond matching), this scenario is inherently
+  contrived against the current provider; worth revisiting if/when a real
+  LLM provider is enabled.
+- **Prompt-injection/secret-leakage detection is a keyword/regex net**
+  (`app/ai/safety.py`), not a semantic classifier — a paraphrased or
+  non-English injection attempt could evade it. Acceptable for a
+  deterministic-by-design mock provider; a residual risk to reassess if a
+  real LLM provider is ever enabled, since a real model could also be
+  independently prompted to resist injection, adding defense-in-depth this
+  keyword layer alone doesn't provide.
+
+### PostgreSQL row-level security — assessed, not added
+
+RLS was evaluated as defense-in-depth for tenant isolation and
+deliberately **not added** in Phase 9. Today's guarantee is entirely
+application-layer: every tenant-owned query goes through
+`TenantScopedRepository` (or an equivalent explicit `tenant_id` filter,
+grep-able where it doesn't), and this phase's audit found the pattern
+applied with no exception across every Phase 1–8 surface. Adding RLS now
+would mean maintaining two independent enforcement mechanisms (ORM-level
+filtering and Postgres policies) that must stay in exact agreement, for a
+codebase where a single, consistently-applied application-layer pattern
+already has no known gap — real risk (policies drifting out of sync with
+application logic, or masking a bug instead of surfacing it) for
+speculative benefit. **A future adoption plan, if ever justified by a
+compliance requirement or a multi-application-layer architecture accessing
+the same database:** enable RLS per tenant-owned table with a policy of
+the shape `USING (tenant_id = current_setting('app.tenant_id')::uuid)`,
+require every request-scoped session to `SET LOCAL app.tenant_id` immediately
+after acquiring a connection (a natural fit for `session_scope()`'s single
+ownership point, see above), and add a CI check that fails if a new
+tenant-owned table is added without a corresponding policy. This is a
+design note, not a task in progress.
+
+### Dependency advisories
+
+Backend: audited with `pip-audit` (installed temporarily into the venv for
+this one pass, then fully uninstalled again — not a permanent project
+dependency, no paid vulnerability database used; verified against its
+actual JSON output, not just package/severity labels — see the exact CVE
+descriptions and reachability analysis below). Frontend/widget: audited
+with `npm audit` (built into npm already, no install needed).
+
+**Applied this phase** (safe, in-range, fully tested — full suite +
+focused regression tests, before and after):
+
+| Package | Was | Now | Advisories closed | Why safe |
+|---|---|---|---|---|
+| `PyJWT` (backend, runtime — signs/verifies every access token) | 2.10.1 | **2.13.0** | All PYSEC entries against 2.10.1 | Same major line (2.x), a standalone dependency with no other package pinning it. `tests/test_jwt_clock_skew.py` + `tests/test_auth.py` + `tests/test_ai_providers.py` (50 tests) re-verified passing; full 723-test suite re-verified passing. New (harmless) `InsecureKeyLengthWarning` observed only from test fixtures that deliberately use a short HMAC key to test an edge case — production always uses a 64-byte `secrets.token_urlsafe(64)`-generated `JWT_SECRET_KEY`, never a short one, so this warning is test-only noise, not a production concern. |
+| `python-dotenv` (backend, runtime — loads `backend/.env`) | 1.0.1 | **1.2.3** | 1 PYSEC entry | Same major line (1.x), parses a local developer-controlled file, not user input. Verified `get_settings()` still loads `backend/.env` correctly post-upgrade. |
+
+Both `backend/requirements.txt` and `backend/requirements.lock.txt` were
+updated to match, and the installed venv was confirmed to match the lock
+file afterward (`pip freeze` diffed against the lock file — only
+pre-existing, unrelated entries differ, e.g. a local `py-spy` profiling
+tool never listed in either requirements file).
+
+**Deferred, with a precise blocker and reachability analysis for each**
+(no forced major-version upgrade, per this phase's explicit constraint):
+
+| Package | Current | Exposure | Advisories | Reachable in this app? | Blocker | Follow-up plan |
+|---|---|---|---|---|---|---|
+| `starlette` (runtime, transitive via FastAPI) | 0.41.3 | Runtime, underlies every HTTP request | PYSEC-2026-161/248 (unvalidated `Host` header used to reconstruct `request.url`), -249 (`request.form()` max-size not enforced for urlencoded bodies), -1941/-1942 (multipart/`FileResponse` Range-header DoS), -2280/-2281 (`HTTPEndpoint` method-name `getattr`, Windows UNC path SSRF in `StaticFiles`) | **No known code path uses any of the affected features** — verified by grep: this codebase has zero uses of `request.url`, `request.form()`, `FileResponse`, `StaticFiles`, `HTTPEndpoint`, or `UploadFile` anywhere in `backend/app`. Every route takes a JSON body via a Pydantic model, not a Starlette-parsed form or a served file. Real exposure today is effectively nil — the risk is latent, not active. | **Hard version constraint, not caution**: `fastapi==0.115.6` requires `starlette<0.42.0,>=0.40.0` (confirmed from the wheel's own `METADATA`) — no patched starlette release exists inside that range (the earliest fix, 0.47.2, requires `>=0.42`). Starlette cannot be bumped in isolation without violating FastAPI's own pin. | Upgrading FastAPI to unlock a compatible starlette is a large, multi-version jump (0.115.6 → latest 0.141.x) that needs its own dedicated, reviewed migration — explicitly out of scope for a hardening pass per this phase's constraint. **Compensating control in the meantime**: continue to never introduce `request.url`-based logic, form-urlencoded parsing, `FileResponse`, or `StaticFiles` into this codebase without re-running this exposure analysis first. |
+| `cryptography` (runtime — Fernet encryption of integration signing secrets) | 43.0.3 | Runtime, security-critical | GHSA-537c-gmf6-5ccf, PYSEC-2026-1284 (both: bundled OpenSSL binary vulnerabilities), PYSEC-2026-35/2141/3553/3554 (all: X.509 certificate-chain/DNS-name-constraint verification logic) | **Partial** — this codebase's only use of `cryptography` is `app/core/crypto.py`'s Fernet symmetric encryption (AES-128-CBC + HMAC-SHA256) for integration signing secrets; it never performs X.509/certificate-chain verification via this package (outbound HTTPS calls go through `httpx`, which verifies TLS certificates via the standard-library `ssl` module against the system/OpenSSL trust store directly, not through `cryptography`'s own higher-level X.509 verification API). So the 4 certificate-verification CVEs have **no reachable code path** here. The 2 bundled-OpenSSL-binary CVEs are broader — Fernet's own AES/HMAC operations still run through the same statically-linked OpenSSL, so those two carry more realistic (if still non-network-facing) exposure. | No single patch version resolves all 6; full remediation needs 49.0.0, a large jump for a package with a fast, calendar-based release cadence that has occasionally changed default parameters across versions. | Plan a dedicated upgrade-and-test cycle to the then-latest-patched version; do not bundle with unrelated changes. Given the 4 certificate-verification CVEs are unreachable here, this is lower urgency than the "runtime, security-critical" label alone would suggest — reflects real, analyzed exposure, not a blanket "critical" claim. |
+| `pytest` / `pytest-asyncio` (dev-only — never shipped) | 8.3.4 / 0.25.0 | Dev-only, no production exposure | PYSEC-2026-1845 (predictable `/tmp/pytest-of-{user}` directory naming — a local-multi-user-host privilege/DoS issue) | Not applicable to this project's actual CI/dev usage (single-developer or single-CI-runner machines, not a shared multi-tenant build host) | Fix is `9.0.3`, a major-version bump requiring a compatibility pass | Low priority given dev-only exposure and the specific threat model (shared-host privilege escalation) not matching this project's actual usage; revisit alongside a planned pytest 9.x migration |
+| `postcss` (frontend, **build-time only**, bundled inside `node_modules/next/node_modules/postcss`) | was 8.4.31 nested / 8.5.26 top-level | **8.5.28** (nested copy only, via an npm `overrides` entry in `frontend/package.json` — Next.js's own version is untouched) | All 4 GHSA advisories closed — `npm audit` now reports 0 vulnerabilities | — | — (resolved) | Applied via `"overrides": {"next": {"postcss": "8.5.28"}}` — a targeted patch to the one vulnerable nested copy, not a Next.js version change. Verified: `npm audit` → 0 vulnerabilities, `tsc --noEmit` clean, `eslint` clean, full `vitest` suite passing, `next build` succeeding. |
+| `esbuild` (widget, **dev-only**) | ≤0.24.2 | Dev-only; the vulnerable code path (`esbuild serve`'s permissive CORS) is never invoked — `widget/esbuild.config.mjs` only ever calls the one-shot `build()` API | 1 GHSA advisory (moderate) | Confirmed via source read: no `.serve(` call anywhere in this repo | npm itself reports the only fix (`0.28.2`) as `isSemVerMajor: true` — no non-major patch exists | Not urgent given the vulnerable code path isn't used; safe to take alongside a routine devDependency major-version review when convenient, not forced here |
+
+**Nothing in this table is called "all green."** Two runtime-critical
+findings (`starlette`, `cryptography`) remain genuinely open, each with an
+explicit blocker, a documented compensating control, and a concrete
+follow-up plan — not silently deferred and not downplayed.

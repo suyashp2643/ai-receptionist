@@ -33,7 +33,7 @@ from datetime import UTC, datetime
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.core.crypto import SecretDecryptionError, decrypt_secret, hash_api_key
+from app.core.crypto import SecretDecryptionError, decrypt_secret, encrypt_secret, hash_api_key
 from app.integrations.signing import REPLAY_WINDOW_SECONDS, verify_signature
 from app.models.enums import InboundEventStatus
 from app.models.integration import InboundIntegrationEvent, IntegrationConnection
@@ -41,11 +41,53 @@ from app.repositories.integration import InboundIntegrationEventRepository, find
 from app.schemas.integration_inbound import InboundEventSubmitRequest
 from app.services import activity_service
 
+# Used only to normalize timing (see _fail_like_a_known_key_with_a_bad_signature
+# below) — never a real secret, never stored, never compared against
+# anything a caller supplies.
+_DUMMY_SIGNING_SECRET = "dummy-secret-for-inbound-auth-timing-normalization-only"
+
 
 class InboundAuthError(Exception):
     """Raised for any authentication failure — see this module's docstring
     for why the API route must map every instance of this to the exact
     same generic 401, never a more specific message."""
+
+
+def _fail_like_a_known_key_with_a_bad_signature(
+    settings: Settings,
+    *,
+    signature: str,
+    raw_body: bytes,
+    timestamp: str,
+    event_id_for_signature: str,
+    event_version: int,
+) -> None:
+    """Phase 9 audit finding: without this, an unknown API key returned
+    faster than a known key with a bad signature (which additionally pays
+    for a Fernet decrypt + HMAC verification), letting a caller distinguish
+    "this key doesn't exist" from "it exists" by response latency alone —
+    a weak but real key-enumeration oracle. This burns the same shape of
+    work (an encrypt+decrypt round trip plus a real signature verification)
+    before the caller's `InboundAuthError`, mirroring
+    app.core.security.run_dummy_password_verification's rationale for
+    login. Deliberately swallows every exception — this path exists only
+    to cost time, never to do real work or surface a different failure
+    mode than the uniform 401 the caller already gets."""
+    try:
+        if settings.integration_encryption_key:
+            ciphertext, key_version = encrypt_secret(_DUMMY_SIGNING_SECRET, settings=settings)
+            decrypt_secret(ciphertext, key_version=key_version, settings=settings)
+    except Exception:
+        pass
+    verify_signature(
+        _DUMMY_SIGNING_SECRET,
+        signature=signature,
+        body=raw_body,
+        timestamp=timestamp,
+        delivery_id=event_id_for_signature,
+        event_id=event_id_for_signature,
+        schema_version=str(event_version),
+    )
 
 
 class InboundConflictError(Exception):
@@ -91,6 +133,14 @@ def _authenticate(
 
     connection = find_connection_by_inbound_api_key_hash(db, hash_api_key(raw_api_key))
     if connection is None or not connection.signing_secret_ciphertext:
+        _fail_like_a_known_key_with_a_bad_signature(
+            settings,
+            signature=signature,
+            raw_body=raw_body,
+            timestamp=timestamp,
+            event_id_for_signature=event_id_for_signature,
+            event_version=event_version,
+        )
         raise InboundAuthError("Invalid credentials.")
 
     try:

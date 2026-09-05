@@ -6,7 +6,7 @@ import { useDashboardContext } from "@/components/dashboard/DashboardContext";
 import { StatusBadge } from "@/components/dashboard/StatusBadge";
 import { EmptyState, ErrorState, LoadingState, PaginationControls } from "@/components/dashboard/ListStates";
 import { ExportButton } from "@/components/dashboard/ExportButton";
-import { DateRangeFilter, defaultDateRange } from "@/components/dashboard/DateRangeFilter";
+import { DateRangeFilter, defaultAppointmentDateRange } from "@/components/dashboard/DateRangeFilter";
 import { listAppointments, type AppointmentListItem } from "@/lib/dashboard-api";
 
 const LIMIT = 25;
@@ -17,7 +17,7 @@ function AppointmentsBody({ tenantId, canManage }: { tenantId: string; canManage
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [statusFilter, setStatusFilter] = useState("");
-  const [{ dateFrom, dateTo }, setDateRange] = useState(defaultDateRange());
+  const [{ dateFrom, dateTo }, setDateRange] = useState(defaultAppointmentDateRange());
   const [error, setError] = useState<string | null>(null);
 
   function load() {

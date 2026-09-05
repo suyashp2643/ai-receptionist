@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -87,6 +88,62 @@ describe("ConfirmDialog", () => {
 
     await userEvent.click(screen.getByRole("alertdialog").parentElement!);
     expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("traps Tab between the two buttons instead of letting focus escape the dialog", async () => {
+    render(
+      <ConfirmDialog
+        open
+        title="Disable this integration?"
+        description="No further events will be delivered."
+        confirmLabel="Disable"
+        onConfirm={vi.fn()}
+        onCancel={vi.fn()}
+      />
+    );
+    const cancelButton = screen.getByRole("button", { name: "Cancel" });
+    const confirmButton = screen.getByRole("button", { name: "Disable" });
+    expect(cancelButton).toHaveFocus();
+
+    await userEvent.tab();
+    expect(confirmButton).toHaveFocus();
+
+    await userEvent.tab();
+    expect(cancelButton).toHaveFocus();
+
+    await userEvent.tab({ shift: true });
+    expect(confirmButton).toHaveFocus();
+  });
+
+  it("restores focus to the element that opened it once closed", async () => {
+    function Harness() {
+      const [open, setOpen] = useState(true);
+      return (
+        <>
+          <button type="button" onClick={() => setOpen(true)}>
+            Trigger
+          </button>
+          <ConfirmDialog
+            open={open}
+            title="Disable this integration?"
+            description="No further events will be delivered."
+            onConfirm={vi.fn()}
+            onCancel={() => setOpen(false)}
+          />
+        </>
+      );
+    }
+    const trigger = document.createElement("button");
+    trigger.textContent = "Trigger";
+    document.body.appendChild(trigger);
+    trigger.focus();
+
+    render(<Harness />);
+    expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus();
+
+    await userEvent.keyboard("{Escape}");
+    expect(trigger).toHaveFocus();
+    document.body.removeChild(trigger);
   });
 
   it("disables both buttons and shows a busy label on the confirm button while busy", () => {

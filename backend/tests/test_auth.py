@@ -88,6 +88,35 @@ def test_refresh_cookie_stays_narrowly_scoped_to_auth_routes(db_backed_client: T
     assert "path=/api/v1/auth" in raw.lower()
 
 
+def test_refresh_cookie_carries_httponly_and_samesite_attributes(db_backed_client: TestClient):
+    """Phase 9 audit gap: prior tests only asserted `Path` (via the raw
+    `Set-Cookie` header, since httpx's parsed cookie jar discards
+    everything else). `HttpOnly` and `SameSite` are the actual XSS/CSRF
+    mitigations described in docs/security.md's "Cookie behavior" section —
+    this proves they're really on the wire, not just configured in code that
+    could silently stop being reached. `Secure` is asserted separately
+    below against `settings.resolved_cookie_secure` rather than a hardcoded
+    True/False, since it is legitimately off in this test's `development`
+    environment and the assertion must reflect that, not contradict it."""
+    response, _ = _register(db_backed_client)
+    raw = _set_cookie_header_for(response, settings.refresh_cookie_name).lower()
+    assert "httponly" in raw
+    assert f"samesite={settings.cookie_samesite}" in raw
+    assert ("secure" in raw) == settings.resolved_cookie_secure
+
+
+def test_csrf_cookie_is_not_httponly_but_shares_samesite_and_secure(db_backed_client: TestClient):
+    """The CSRF cookie must remain JS-readable (no `HttpOnly`) for the
+    double-submit pattern to work at all — see app/api/cookies.py — while
+    still carrying the same `SameSite`/`Secure` posture as the refresh
+    cookie."""
+    response, _ = _register(db_backed_client)
+    raw = _set_cookie_header_for(response, settings.csrf_cookie_name).lower()
+    assert "httponly" not in raw
+    assert f"samesite={settings.cookie_samesite}" in raw
+    assert ("secure" in raw) == settings.resolved_cookie_secure
+
+
 def test_registration_creates_user_tenant_and_owner_membership_atomically(
     db_backed_client: TestClient, db_session: Session
 ):

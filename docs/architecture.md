@@ -1148,3 +1148,58 @@ row and an `ActivityEvent` — it never calls into
 `enquiry_service`/`appointment_request_service`/`human_handoff_service`.
 This is a deliberate Phase 8 scope boundary, not an oversight — seen
 again in `docs/integration-contracts.md`.
+
+## Phase 9: closing the widget visitor-session revocation gap
+
+Phase 5 built the full capability-token lifecycle (issue, resolve,
+expire, revoke — see docs/security.md's "Visitor capability-token
+lifecycle") but only ever wired the *installation-wide* revoke action to
+a route; `revoke_session` (single-conversation scope) sat unused. Phase 9
+closes this the same way every other single-resource action on this
+surface already works: `POST /tenants/{tenant_id}/conversations/{id}/revoke-widget-session`
+(`app/api/v1/dashboard_conversations.py`) looks up the one
+`WidgetVisitorSession` scoped to that conversation
+(`WidgetVisitorSessionRepository.get_by_conversation_id`, already used by
+the conversation-detail route to surface session state — nothing new
+added to the repository), calls the existing `revoke_session()`, records
+an `ActivityEvent`, and returns the same generic idempotent-success shape
+whether the session was already revoked or not — deliberately never a
+distinguishable state a caller could use to probe. The dashboard's
+conversation-detail page shows a "Revoke session" action only when
+`widget_session` is present and not already revoked (never a dead
+button), and the schema (`ConversationDetailWidgetSession`) exposes only
+`id`/`is_revoked`/`expires_at` — never the token or its hash, matching
+this codebase's existing rule that a dashboard route never needs, and
+therefore never sees, a capability token's hash.
+
+## Phase 9 remediation round 2: shared-component flex-overflow pattern, and a date-filter direction mismatch
+
+Two genuine bugs, found via systematic narrow-viewport verification, share
+a root cause worth naming once rather than per-component: a plain
+`className="flex gap-N"` row with no `flex-wrap`, containing form
+controls with no `min-w-0`/`w-full`, cannot shrink below its children's
+combined intrinsic content width — a well-known flexbox default
+(`min-width: auto` on flex items), not a bug in Tailwind or in React.
+`components/settings/QualificationEditor.tsx` (Label/Type row, and the
+Required/key/action-buttons row) and `components/settings/LocationsManager.tsx`
+(the per-day working-hours row) both had this shape; both are now
+`flex-wrap` (+ `min-w-0`/`w-full` on the qualification editor's two
+form-control columns specifically, since those needed to shrink *and*
+stay side-by-side on wider screens, not just avoid overflow). Both
+components are shared between an onboarding step and its corresponding
+`/dashboard/settings/*` page, so each fix covers two routes from one
+change.
+
+Separately: `components/dashboard/DateRangeFilter.tsx`'s
+`defaultDateRange()` is backward-looking (`[today − 89, today]`) by
+design, correct for every list whose date filter is keyed on record
+creation time. The appointments list is the one surface whose filter is
+keyed on `requested_date` instead (`app/repositories/appointment_request.py`) —
+a field that is forward-looking by nature (a visitor requests an
+appointment for a future date far more often than a past one). Using the
+shared backward-looking default there silently hid exactly the near-term
+upcoming requests a staff member most needs to see on first load — found
+live, not by inspection, when a request for 10 days out did not appear
+in the list at all. Added `defaultAppointmentDateRange()` (30 days back,
+90 ahead) and switched only that one page to it; every other list page's
+default is unchanged.

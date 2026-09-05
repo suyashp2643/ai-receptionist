@@ -130,6 +130,7 @@ export interface ConversationDashboardDetail {
   enquiry: { id: string; status: string } | null;
   appointment_requests: { id: string; status: string; requested_date: string }[];
   handoffs: { id: string; status: string }[];
+  widget_session: { id: string; is_revoked: boolean; expires_at: string } | null;
 }
 
 export interface ListParams {
@@ -162,6 +163,15 @@ export function listConversations(
 
 export function getConversationDetail(tenantId: string, conversationId: string): Promise<ConversationDashboardDetail> {
   return apiRequest(`/api/v1/tenants/${tenantId}/conversations/${conversationId}`);
+}
+
+export function revokeConversationWidgetSession(
+  tenantId: string,
+  conversationId: string
+): Promise<{ status: string; revoked_at: string }> {
+  return apiRequest(`/api/v1/tenants/${tenantId}/conversations/${conversationId}/revoke-widget-session`, {
+    method: "POST",
+  });
 }
 
 // --- Contacts ------------------------------------------------------------

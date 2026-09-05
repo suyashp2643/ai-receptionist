@@ -197,7 +197,21 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins_list(self) -> list[str]:
-        return [origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()]
+        """`app.main` always pairs this list with `allow_credentials=True`
+        (the dashboard's CORS policy is never credential-less) — browsers
+        already refuse a literal `*` alongside credentials, but that
+        protection lives in the browser, not this server. A misconfigured
+        `CORS_ALLOW_ORIGINS=*` should fail loudly at startup instead of
+        silently relying on every client's CORS enforcement being correct,
+        so this raises rather than returning `["*"]`."""
+        origins = [origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()]
+        if "*" in origins:
+            raise RuntimeError(
+                "CORS_ALLOW_ORIGINS must not contain '*' — this app always pairs CORS with "
+                "allow_credentials=True, and a wildcard origin combined with credentials is "
+                "an invalid, dangerous configuration. Set an explicit comma-separated origin list."
+            )
+        return origins
 
     @property
     def platform_preview_origins_list(self) -> list[str]:

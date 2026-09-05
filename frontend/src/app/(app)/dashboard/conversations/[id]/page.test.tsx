@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import ConversationDetailPage from "./page";
 
 vi.mock("next/navigation", () => ({
@@ -23,6 +24,7 @@ vi.mock("@/components/dashboard/DashboardContext", () => ({
 
 const mockApi = vi.hoisted(() => ({
   getConversationDetail: vi.fn(),
+  revokeConversationWidgetSession: vi.fn(),
   listNotes: vi.fn(async () => []),
   createNote: vi.fn(),
   deleteNote: vi.fn(),
@@ -65,6 +67,7 @@ const detail = {
   enquiry: null,
   appointment_requests: [],
   handoffs: [],
+  widget_session: null,
 };
 
 describe("ConversationDetailPage", () => {
@@ -83,5 +86,35 @@ describe("ConversationDetailPage", () => {
     mockApi.getConversationDetail.mockResolvedValue({ ...detail, had_safety_event: true, had_clinic_emergency: true });
     render(<ConversationDetailPage />);
     await waitFor(() => expect(screen.getByText(/Clinic emergency/)).toBeInTheDocument());
+  });
+
+  it("lets an admin revoke an active widget session, and hides the button once revoked", async () => {
+    const withSession = {
+      ...detail,
+      widget_session: { id: "s1", is_revoked: false, expires_at: "2026-08-02T10:00:00Z" },
+    };
+    mockApi.getConversationDetail.mockResolvedValueOnce(withSession);
+    mockApi.revokeConversationWidgetSession.mockResolvedValue({ status: "revoked", revoked_at: "2026-08-01T11:00:00Z" });
+    render(<ConversationDetailPage />);
+
+    const revokeButton = await screen.findByRole("button", { name: "Revoke session" });
+    await userEvent.click(revokeButton);
+    const confirmButton = await screen.findByRole("button", { name: "Revoke" });
+    mockApi.getConversationDetail.mockResolvedValueOnce({
+      ...withSession,
+      widget_session: { ...withSession.widget_session, is_revoked: true },
+    });
+    await userEvent.click(confirmButton);
+
+    await waitFor(() => expect(mockApi.revokeConversationWidgetSession).toHaveBeenCalledWith("tenant-1", "conv-1"));
+    await waitFor(() => expect(screen.getByText(/Revoked/)).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Revoke session" })).not.toBeInTheDocument();
+  });
+
+  it("never shows a revoke button when there is no widget session", async () => {
+    mockApi.getConversationDetail.mockResolvedValue(detail);
+    render(<ConversationDetailPage />);
+    await waitFor(() => expect(screen.getByText("What are your hours?")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Revoke session" })).not.toBeInTheDocument();
   });
 });

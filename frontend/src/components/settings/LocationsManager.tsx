@@ -156,7 +156,7 @@ export function LocationsManager({ tenantId, canEdit }: { tenantId: string; canE
 
           <p className="text-sm font-medium mt-2">Working hours</p>
           {days.map((day, index) => (
-            <div key={day.day_of_week} className="flex items-center gap-2 text-sm">
+            <div key={day.day_of_week} className="flex flex-wrap items-center gap-2 text-sm">
               <span className="w-24">{DAY_NAMES[day.day_of_week]}</span>
               <label className="flex items-center gap-1">
                 <input

@@ -577,3 +577,40 @@ class TestWidgetInstallationManagement:
         snippet = snippet_response.json()["embed_snippet"]
         assert str(tenant.id) not in snippet
         assert public_id in snippet
+
+    def test_cannot_access_other_tenants_widget_installation(self, db_backed_client: TestClient, db_session: Session):
+        """Phase 9 audit finding: this surface had zero cross-tenant
+        regression tests despite exposing activate/pause/revoke actions
+        with real product impact if tenant scoping ever regressed."""
+        tenant_a, owner_a, _ = make_tenant_with_owner(db_session, tenant_name="Tenant A")
+        tenant_b, _, _ = make_tenant_with_owner(db_session, tenant_name="Tenant B")
+        receptionist_b, _ = _active_receptionist(db_session, tenant_b)
+        installation_b = _active_installation(db_session, tenant_b, receptionist_b)
+        headers_a = _auth_headers(owner_a)
+
+        get_response = db_backed_client.get(
+            f"/api/v1/tenants/{tenant_a.id}/widget-installations/{installation_b.id}", headers=headers_a
+        )
+        assert get_response.status_code == 404
+
+        patch_response = db_backed_client.patch(
+            f"/api/v1/tenants/{tenant_a.id}/widget-installations/{installation_b.id}",
+            json={"allowed_domains": ["evil.example.com"]},
+            headers=headers_a,
+        )
+        assert patch_response.status_code == 404
+
+        pause_response = db_backed_client.post(
+            f"/api/v1/tenants/{tenant_a.id}/widget-installations/{installation_b.id}/pause", headers=headers_a
+        )
+        assert pause_response.status_code == 404
+
+        revoke_response = db_backed_client.post(
+            f"/api/v1/tenants/{tenant_a.id}/widget-installations/{installation_b.id}/revoke", headers=headers_a
+        )
+        assert revoke_response.status_code == 404
+
+        # Confirm none of the above actually mutated Tenant B's installation.
+        db_session.refresh(installation_b)
+        assert installation_b.status == WidgetInstallationStatus.ACTIVE
+        assert installation_b.allowed_domains == ["example.com"]

@@ -68,6 +68,9 @@ export function DashboardShell({ children }: { children: ReactNode }) {
 
   return (
     <div className="min-h-screen flex flex-col bg-neutral-50 dark:bg-neutral-950 text-neutral-900 dark:text-neutral-100">
+      <a href="#dashboard-main-content" className="skip-link">
+        Skip to content
+      </a>
       <header className="border-b border-black/10 dark:border-white/10 bg-white dark:bg-neutral-900">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3 min-w-0">
@@ -165,7 +168,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
         )}
       </header>
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 flex flex-col gap-6">
+      <main id="dashboard-main-content" className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 flex flex-col gap-6">
         <DashboardContext.Provider
           value={{
             tenantId: membership.tenant_id,

@@ -57,6 +57,61 @@ class TestPermissionMatrix:
         response = _create_mock_connection(db_backed_client, tenant_id=tenant.id, headers=_auth_headers(owner))
         assert response.status_code == 201
 
+    def test_a_real_connection_id_from_another_tenant_is_still_404(
+        self, db_backed_client: TestClient, db_session: Session
+    ):
+        """Phase 9 audit finding: prior coverage only proved a non-member of
+        Tenant B gets 404 at the tenant level — this proves the stronger,
+        more realistic IDOR case: a genuine member of Tenant A, using
+        Tenant A's own URL and their own valid membership, cannot reach
+        Tenant B's connection by guessing/reusing its real connection_id."""
+        tenant_a, owner_a, _ = make_tenant_with_owner(db_session, tenant_name="Tenant A")
+        tenant_b, owner_b, _ = make_tenant_with_owner(db_session, tenant_name="Tenant B")
+        create_response = _create_mock_connection(
+            db_backed_client, tenant_id=tenant_b.id, headers=_auth_headers(owner_b)
+        )
+        assert create_response.status_code == 201
+        connection_id = create_response.json()["id"]
+        headers_a = _auth_headers(owner_a)
+
+        get_response = db_backed_client.get(
+            f"/api/v1/tenants/{tenant_a.id}/integrations/{connection_id}", headers=headers_a
+        )
+        assert get_response.status_code == 404
+
+        put_response = db_backed_client.put(
+            f"/api/v1/tenants/{tenant_a.id}/integrations/{connection_id}",
+            headers=headers_a,
+            json={"config": {"mode": "success"}, "enabled_event_types": [], "expected_version": 1},
+        )
+        assert put_response.status_code == 404
+
+        pause_response = db_backed_client.post(
+            f"/api/v1/tenants/{tenant_a.id}/integrations/{connection_id}/pause",
+            headers=headers_a,
+            json={"expected_version": 1},
+        )
+        assert pause_response.status_code == 404
+
+        deliveries_response = db_backed_client.get(
+            f"/api/v1/tenants/{tenant_a.id}/integrations/{connection_id}/deliveries", headers=headers_a
+        )
+        assert deliveries_response.status_code == 404
+
+        rotate_response = db_backed_client.post(
+            f"/api/v1/tenants/{tenant_a.id}/integrations/{connection_id}/rotate-secret",
+            headers=headers_a,
+            json={"new_secret": "irrelevant-since-this-must-404-first", "expected_version": 1},
+        )
+        assert rotate_response.status_code == 404
+
+        # Confirm Tenant B's connection actually still exists, untouched, under its own tenant.
+        still_there = db_backed_client.get(
+            f"/api/v1/tenants/{tenant_b.id}/integrations/{connection_id}", headers=_auth_headers(owner_b)
+        )
+        assert still_there.status_code == 200
+        assert still_there.json()["name"] == "Test Mock"
+
 
 class TestConnectionLifecycle:
     def test_full_lifecycle(self, db_backed_client: TestClient, db_session: Session):

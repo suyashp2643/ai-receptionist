@@ -7,7 +7,12 @@ import { useDashboardContext } from "@/components/dashboard/DashboardContext";
 import { SourceBadge, StatusBadge } from "@/components/dashboard/StatusBadge";
 import { ErrorState, LoadingState } from "@/components/dashboard/ListStates";
 import { NotesPanel } from "@/components/dashboard/NotesPanel";
-import { getConversationDetail, type ConversationDashboardDetail } from "@/lib/dashboard-api";
+import { ConfirmDialog } from "@/components/dashboard/ConfirmDialog";
+import {
+  getConversationDetail,
+  revokeConversationWidgetSession,
+  type ConversationDashboardDetail,
+} from "@/lib/dashboard-api";
 import { useAuth } from "@/lib/auth-context";
 
 const ROLE_LABEL: Record<string, string> = {
@@ -17,11 +22,14 @@ const ROLE_LABEL: Record<string, string> = {
   system: "System",
 };
 
-function ConversationDetailBody({ tenantId }: { tenantId: string }) {
+function ConversationDetailBody({ tenantId, canManage }: { tenantId: string; canManage: boolean }) {
   const params = useParams<{ id: string }>();
   const { user } = useAuth();
   const [detail, setDetail] = useState<ConversationDashboardDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [confirmingRevoke, setConfirmingRevoke] = useState(false);
+  const [revokeBusy, setRevokeBusy] = useState(false);
+  const [revokeError, setRevokeError] = useState<string | null>(null);
 
   function load() {
     setError(null);
@@ -34,6 +42,20 @@ function ConversationDetailBody({ tenantId }: { tenantId: string }) {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenantId, params.id]);
+
+  async function handleRevokeSession() {
+    setRevokeBusy(true);
+    setRevokeError(null);
+    try {
+      await revokeConversationWidgetSession(tenantId, params.id);
+      setConfirmingRevoke(false);
+      load();
+    } catch {
+      setRevokeError("Could not revoke this session. Try again.");
+    } finally {
+      setRevokeBusy(false);
+    }
+  }
 
   if (error) return <ErrorState message={error} onRetry={load} />;
   if (!detail) return <LoadingState />;
@@ -159,21 +181,53 @@ function ConversationDetailBody({ tenantId }: { tenantId: string }) {
             </section>
           )}
 
+          {detail.widget_session && (
+            <section className="rounded-lg border border-black/10 dark:border-white/10 p-4">
+              <h2 className="font-medium mb-2">Widget visitor session</h2>
+              <p className="text-sm text-neutral-500">
+                {detail.widget_session.is_revoked
+                  ? "Revoked — this visitor's capability token no longer works."
+                  : `Active until ${new Date(detail.widget_session.expires_at).toLocaleString()}`}
+              </p>
+              {canManage && !detail.widget_session.is_revoked && (
+                <button
+                  type="button"
+                  onClick={() => setConfirmingRevoke(true)}
+                  className="mt-2 rounded border border-red-300 dark:border-red-900/50 px-3 py-1.5 text-sm text-red-700 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20"
+                >
+                  Revoke session
+                </button>
+              )}
+              {revokeError && <p className="text-sm text-red-600 mt-1">{revokeError}</p>}
+            </section>
+          )}
+
           {user && (
             <NotesPanel tenantId={tenantId} entityType="conversation" entityId={detail.id} currentUserId={user.id} />
           )}
         </div>
       </div>
+
+      <ConfirmDialog
+        open={confirmingRevoke}
+        title="Revoke this widget session?"
+        description="The visitor's browser will immediately lose access to this conversation. This does not affect any other visitor or the wider widget installation."
+        confirmLabel="Revoke"
+        destructive
+        busy={revokeBusy}
+        onConfirm={handleRevokeSession}
+        onCancel={() => setConfirmingRevoke(false)}
+      />
     </div>
   );
 }
 
 export default function ConversationDetailPage() {
-  const { tenantId } = useDashboardContext();
+  const { tenantId, canManage } = useDashboardContext();
   return (
     <>
       <h1 className="text-xl font-semibold tracking-tight">Conversation</h1>
-      <ConversationDetailBody tenantId={tenantId} />
+      <ConversationDetailBody tenantId={tenantId} canManage={canManage} />
     </>
   );
 }

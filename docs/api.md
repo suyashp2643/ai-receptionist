@@ -578,8 +578,21 @@ repeatable `source` in `{test, preview, widget}`, repeatable `status`,
 `sort_direction`; bounded `limit`/`offset`, max page size 100), `GET
 .../conversations/{id}` (full transcript with citations/tool-activity/
 qualification/safety flags/linked contact/enquiry/appointment/handoff
-records — never the system prompt, provider secrets, or a capability
-token/hash).
+records, plus `widget_session: {id, is_revoked, expires_at} | null` —
+never the system prompt, provider secrets, or a capability token/hash).
+
+**Revoke a conversation's widget session (Phase 9)** — `POST
+.../conversations/{id}/revoke-widget-session`, admin/owner only. Immediately
+invalidates the one visitor capability token scoped to this conversation
+(the visitor's browser stops working against the public widget API on its
+very next request) without touching the wider `WidgetInstallation` — unlike
+revoking the whole installation, this doesn't force every other visitor to
+re-embed. `404` if the conversation has no widget session (a test/preview
+conversation, or one that's never had one) or doesn't belong to this tenant.
+Idempotent: revoking an already-revoked session returns `200` with the
+original `revoked_at` rather than erroring. Closes a Phase 8 audit finding —
+`app/services/widget_visitor_session_service.revoke_session` existed but was
+never reachable from any route.
 
 **Contacts** — `GET .../contacts` (filters: `search`, `date_from`/
 `date_to`), `GET .../contacts/{id}` (full detail plus linked

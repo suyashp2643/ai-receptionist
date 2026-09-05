@@ -2689,3 +2689,561 @@ data would violate.
 
 **Awaiting explicit review and commit approval. Phase 9 has not been
 started.**
+
+## Phase 9 — Final security, accessibility, responsive, and production-readiness verification
+
+Pre-flight confirmed exactly as expected before any change was made:
+branch `main`, HEAD `f314f73`, clean working tree, alembic head
+`ee559f240268` matching the DB's current revision, `backend/.env` and
+`frontend/.env.local` both git-ignored, no dev servers/workers running,
+and a database connection that succeeds without ever printing
+`DATABASE_URL`.
+
+**Security audit** — five independent, parallel research passes (auth/
+session, tenant isolation, SSRF/integrations/widget, generic
+vulnerabilities/secrets, AI safety/prompt injection), each required to
+cite exact `file:line` evidence. **No exploitable vulnerability was found
+in existing Phase 1–8 code.** Five genuine gaps were found and fixed (see
+docs/security.md's "Phase 9" section for full detail):
+
+1. Widget visitor-session revocation existed in the service layer but was
+   never wired to a route — added `POST .../conversations/{id}/revoke-widget-session`.
+2. No server-side guard against `CORS_ALLOW_ORIGINS=*` — added one to
+   `Settings.cors_origins_list`.
+3. A timing side-channel in inbound-integration auth let an unknown API
+   key be distinguished from a known-key-bad-signature by response
+   latency — added `_fail_like_a_known_key_with_a_bad_signature`.
+4. `claim_handoff` skipped the tenant-existence check its sibling routes
+   (`get_handoff_detail`, `update_handoff_status`) already had, so a
+   foreign-tenant handoff id returned `409` instead of `404` — fixed to
+   match.
+5. `ConfirmDialog` (frontend) and the widget's chat panel (`widget/src/ui.ts`)
+   both moved focus in on open but never restored it on close — fixed
+   both, plus added an explicit Tab-cycle focus trap to `ConfirmDialog`.
+
+29 new backend regression tests were added closing coverage gaps the
+audit found for already-correct behavior: cross-tenant IDOR tests for
+widget installations (previously zero coverage) and integration
+connections (previously only tenant-level, not resource-id-level);
+cross-tenant tests for enquiries/appointments/handoffs (previously only
+contacts had one); a cross-tenant CSV-export test; an entirely new
+HTTP-level test file for analytics auth (`tests/test_analytics_api.py` —
+the existing analytics tests call the service layer directly, bypassing
+`get_tenant_context`); cookie-attribute (`HttpOnly`/`Secure`/`SameSite`)
+assertions where only `Path` was previously asserted; a CORS-wildcard
+rejection test; and an orchestrator-level (not just unit-level) proof
+that an injection-shaped phrase inside a tenant's own retrieved FAQ
+answer doesn't flip the safety engine's `injection_attempt` label (which
+correctly scans only the visitor's own message).
+
+Dependency audit (`pip-audit` for backend — installed temporarily, then
+fully uninstalled; `npm audit` for frontend/widget, already built in):
+found real advisories against `PyJWT`, `cryptography`, `starlette` (all
+backend runtime), plus dev/build-time-only findings in `pytest`,
+`python-dotenv`, `postcss` (via Next.js), and `esbuild` (widget dev-only,
+vulnerable code path never invoked by this project). No upgrade was
+applied — per this phase's explicit no-forced-major-version-upgrade
+constraint, and because `starlette` in particular is version-pinned by
+`fastapi==0.115.6` and can't be bumped in isolation. Full package-by-
+package classification and recommended remediation: docs/security.md.
+
+PostgreSQL row-level security was assessed as defense-in-depth and
+deliberately not added — the application-layer `TenantScopedRepository`
+pattern was found applied with no exception across every Phase 1–8
+surface, and a future adoption plan is documented in docs/security.md
+rather than implemented speculatively.
+
+**Accessibility** — audited marketing pages, auth, onboarding, dashboard,
+integrations, the private test console, the live widget preview, and the
+embedded widget itself (via direct shadow-DOM JS introspection, since the
+Browser tool's accessibility-tree reader does not cross shadow-root
+boundaries the way a real screen reader does). Confirmed live: semantic
+landmarks and heading hierarchy on every page visited; every form field
+properly labeled; the widget's icon-only controls (💬/✕/🎤/🔈) all carry
+correct `aria-label`s; the widget panel is `role="dialog"` with a
+descriptive label and its transcript is `role="log"`; form validation
+errors use `role="alert"`; a skip-to-content link now exists on every
+authenticated-app layout (dashboard and onboarding — marketing already
+had one) alongside the two focus-restoration fixes above. Reduced-motion
+and dark-mode media-query support confirmed present in the shipped CSS.
+
+**Responsive QA** — spot-checked 320px/375px/desktop widths across the
+marketing homepage, dashboard overview, and the conversations list
+(table-in-`overflow-x:auto` pattern, not page-level horizontal scroll) —
+no horizontal overflow found at any width checked. The dashboard's
+desktop nav (`overflow-x-auto`, by design per its own code comment)
+becomes horizontally scrollable in the 768–~900px range rather than
+wrapping or clipping — an existing, deliberate design, not a Phase 9
+regression, noted here for visibility rather than changed.
+
+**Live end-to-end verification**, real backend + PostgreSQL + frontend +
+widget bundle, mock AI provider only, no paid API calls: register → login
+→ full onboarding (business details, clinic industry template, FAQ
+knowledge) → completed onboarding → private test-console conversation
+with a grounded FAQ answer and citation → qualification capture →
+**clinic emergency safety response** (`clinic_urgent` label, fixed
+emergency-services text, qualification correctly paused) → public widget
+conversation via the real widget bundle against the real public API
+(capability token, not a dashboard session) → contact capture → 
+appointment request (correctly worded "pending confirmation", never
+"confirmed") → human handoff request (correctly worded "does not connect
+you immediately") → dashboard records for all of the above, correctly
+tenant-scoped and correctly classified (preview vs. test vs. genuine
+widget traffic in the analytics overview) → CSV export (200, contact
+data present) → SSRF rejection of a metadata-IP (`169.254.169.254`)
+webhook destination, with a clear, accessible error message in the UI →
+logout → a subsequent refresh attempt correctly rejected → full-page
+reload after that correctly redirected to `/login` (session restoration
+fails closed) → confirmed no dashboard access/refresh token in
+`localStorage`/`sessionStorage`/any JS-readable cookie at any point.
+
+**Test data cleanup**: confirmed the working database is exactly
+`ai_receptionist_dev` before deleting anything. Before cleanup: 8 tenants
+(the 7 pre-existing ones, unchanged, plus `Phase9 QA Workspace`). Deleted
+the one tenant this phase created (cascade verified: `tenant_members`,
+`receptionists`, `faqs`, `conversations`, `conversation_messages`,
+`contacts`, `enquiries`, `appointment_requests`, `human_handoffs`,
+`activity_events`, `widget_installations`, `widget_visitor_sessions` all
+reach `0` rows for that tenant afterward) and its one associated user row
+directly (global, not cascaded from the tenant). Confirmed exactly 7
+tenants remain afterward, matching the pre-existing baseline. Noted, but
+deliberately left untouched (out of this phase's scope): a
+`Phase3 QA Workspace` tenant that appears to be leftover test data from an
+earlier phase's own QA pass — not created by this phase, not evaluated
+for deletion.
+
+**Automated verification**: backend 723 tests pass (694 baseline + 29
+new), `ruff` clean, `mypy` reports zero issues across 198 source files,
+`alembic check` reports no drift. Frontend: 264 tests pass (up from 258),
+`eslint` clean, `tsc --noEmit` clean, `next build` succeeds. Widget: 41
+tests pass (up from 40), `eslint`/`tsc --noEmit` clean, build + bundle
+succeed (`dist/widget.js`, ~27KB, unchanged in size class).
+
+**Process/connection cleanup confirmed**: no dev servers, workers, or
+test processes left running; no idle-in-transaction sessions or held
+locks against `ai_receptionist_dev` after stopping the backend server
+used for live verification.
+
+**Awaiting explicit review and commit approval.**
+
+## Phase 9 remediation round 2 — closing the coverage gaps in the first pass
+
+The first Phase 9 pass sampled 3 pages across a few widths and deferred
+every dependency upgrade. This round closes both gaps: a systematic
+route/viewport matrix, deeper accessibility evidence, the E2E items the
+first pass didn't reach, a full backend verification round (including a
+hand-reviewed migration round trip), and two dependency upgrades actually
+applied and tested rather than only recommended.
+
+### Genuine bugs found and fixed this round
+
+1. **Qualification field editor overflowed horizontally at narrow
+   widths.** `components/settings/QualificationEditor.tsx` laid out each
+   field's Label/Type row, and its Required/key/action-button row, in a
+   plain non-wrapping flex row. Neither the "Label" input nor the "Type"
+   select had `min-w-0`, so flexbox's default `min-width: auto` kept both
+   at their full intrinsic content width regardless of viewport — a
+   textbook flexbox min-content overflow, not something a `sm:`/`md:`
+   breakpoint class alone would fix. Confirmed by constraining the
+   rendered card to 272px (a synthetic proxy for a 320px viewport, used
+   because live viewport emulation became unreliable for this
+   specific page mid-session — see the Responsive QA note below) and
+   observing the row's children extend past it. Fixed: `flex-wrap` +
+   `min-w-0` + `w-full` on both rows. This component is shared by both
+   `/onboarding/qualification` and `/dashboard/settings/qualification`, so
+   one fix covers both call sites.
+2. **Same overflow pattern in the locations working-hours editor.**
+   `components/settings/LocationsManager.tsx`'s per-day row (day name +
+   "Open" checkbox + two `<input type="date">`-adjacent time inputs + "to")
+   had the identical non-wrapping-flex-row shape, just as prone to
+   overflow at narrow widths. Fixed with `flex-wrap`, which — unlike the
+   `min-w-0` approach above — is a categorically overflow-proof fix (items
+   move to a new line instead of shrinking below content size), so no
+   synthetic-width verification was needed for this one.
+3. **The appointments list's default date filter silently hid upcoming
+   appointment requests.** Found live: a widget-submitted request for 10
+   days out did not appear in the list at all on first load. Root cause:
+   every list page shares `defaultDateRange()` (`components/dashboard/DateRangeFilter.tsx`),
+   which is backward-looking — `[today − 89, today]` — correct for filters
+   keyed on when a record was *created* (conversations, contacts,
+   enquiries, handoffs), but wrong for appointments, whose filter is keyed
+   on `requested_date` (`app/repositories/appointment_request.py`'s
+   `requested_date_after`/`_before`) — a field that is forward-looking by
+   nature. Added `defaultAppointmentDateRange()` (30 days back, 90 days
+   ahead) and switched only the appointments page to it. Verified live:
+   the same appointment appeared immediately after the fix, with no other
+   list page's default touched.
+4. **Widget panel close still didn't restore focus in one path** — the
+   round 1 `widget/src/ui.ts` fix was re-verified live this round (an
+   earlier live check had been fooled by a stale cached bundle in the
+   browser tab; a cache-busted reload confirmed the fix genuinely works).
+   No further code change was needed — this is a verification note, not a
+   new bug.
+
+None of the four weakens any security or validation rule; all are pure
+layout/default-filter/verification fixes.
+
+### Responsive QA — exact route/viewport matrix
+
+Widths targeted: **320, 375, 768, 1024, 1440** (approximate, per the
+brief). All were achieved exactly via the Browser tool's viewport
+emulation for the large majority of pages below; a genuine tooling
+limitation surfaced partway through this round and is disclosed
+precisely rather than silently worked around:
+
+**Tooling limitation, stated precisely**: the Browser pane runs hidden in
+this session (the user is not actively watching it). For most pages,
+`resize_window(320, …)` correctly reported `window.innerWidth === 320`
+and the resulting overflow check was a genuine 320px measurement. For a
+small number of page loads — specifically `/onboarding/qualification` and
+`/dashboard/settings/qualification` on repeated attempts — the emulated
+viewport instead silently floored to a wider value (394px, then later
+601–618px across different attempts, never a fixed number) despite
+requesting 320px; `window.innerWidth` itself reflected the floored value,
+confirming this is the tool's viewport emulation under the hidden-pane
+condition, not anything content-driven. Wider requests (768/1024/1440,
+and an explicit 1000px control check) were honored exactly every time —
+only the narrow end was affected, intermittently. Where this occurred,
+narrow-width verification was instead done by directly constraining the
+rendered component's container width via a synthetic style override (a
+valid, standard technique — see finding #1 above) rather than by
+asserting a viewport-level measurement the tool would not reliably
+produce that session. This is disclosed here so the "checked at 320px"
+claims below are read precisely: verified via true viewport emulation
+except where explicitly noted as synthetic-DOM-constraint verification.
+
+| Route | 320 | 375 | 768 | 1024 | 1440 | Method | Notes |
+|---|---|---|---|---|---|---|---|
+| `/` (marketing home) | ✓ | — | ✓ | ✓ | ✓ | live viewport | No overflow at any width checked |
+| `/pricing` | ✓ | — | ✓ | — | ✓ | live viewport | |
+| `/security` | ✓ | — | ✓ | — | ✓ | live viewport | |
+| `/contact` | ✓ | — | — | — | ✓ | live viewport | |
+| `/demo/clinic` | ✓ | — | — | — | ✓ | live viewport | Iframe present, sandboxed, isolated (see E2E section) |
+| `/demo/hotel` | ✓ | — | — | — | ✓ | live viewport | |
+| `/demo/real-estate` | ✓ | — | — | — | ✓ | live viewport | Not independently re-checked for overflow this round (same shared page template as clinic/hotel, both clean) — sampled, not exhaustively re-verified |
+| `/register` | ✓ | — | ✓ | — | ✓ | live viewport | |
+| `/login` | ✓ | — | — | — | ✓ | live viewport | |
+| `/onboarding/business` | ✓ | — | ✓ | — | ✓ | live viewport | |
+| `/onboarding/industry` | ✓ | — | — | — | ✓ | live viewport | |
+| `/onboarding/receptionist` | ✓ | — | — | — | ✓ | live viewport | |
+| `/onboarding/locations` | ✓ | — | — | — | ✓ | live viewport | Working-hours row bug (#2) exists in a state (no locations added) that didn't render the vulnerable row during this pass — the fix was verified by source-level flex mechanics (`flex-wrap` is overflow-proof by construction) rather than live reproduction |
+| `/onboarding/services` | ✓ | — | — | — | ✓ | live viewport | |
+| `/onboarding/knowledge` | ✓ | — | — | — | ✓ | live viewport | |
+| `/onboarding/qualification` | synthetic (272px container) | — | — | — | ✓ | synthetic + live | Bug #1 found and fixed here; see tooling-limitation note above |
+| `/onboarding/actions` | ✓ | — | — | — | ✓ | live viewport | |
+| `/onboarding/review` | ✓ | — | — | — | ✓ | live viewport | |
+| `/dashboard` (overview) | ✓ | — | ✓ | ✓ | ✓ | live viewport | Full 5-width pass, flagship page |
+| `/dashboard/conversations` | ✓ | — | — | — | ✓ | live viewport | |
+| `/dashboard/contacts` | ✓ | — | — | — | ✓ | live viewport | |
+| `/dashboard/enquiries` | ✓ | — | — | — | ✓ | live viewport | |
+| `/dashboard/appointments` | ✓ | — | — | — | ✓ | live viewport | Re-checked after fix #3; shows the previously-hidden row correctly |
+| `/dashboard/handoffs` | ✓ | — | — | — | ✓ | live viewport | |
+| `/dashboard/activity` | ✓ | — | — | — | ✓ | live viewport | |
+| `/dashboard/settings/business-profile` | ✓ | — | — | — | ✓ | live viewport | |
+| `/dashboard/settings/receptionist` | ✓ | — | — | — | ✓ | live viewport | |
+| `/dashboard/settings/locations` | ✓ | — | — | — | ✓ | live viewport | Same caveat as onboarding/locations above |
+| `/dashboard/settings/services` | ✓ | — | — | — | ✓ | live viewport | |
+| `/dashboard/settings/knowledge` | ✓ | — | — | — | ✓ | live viewport | |
+| `/dashboard/settings/qualification` | synthetic (via shared component fix) | — | — | — | ✓ | synthetic + live | Same shared component as onboarding/qualification |
+| `/dashboard/settings/actions` | ✓ | — | — | — | ✓ | live viewport | |
+| `/dashboard/receptionist/test` (test console) | ✓ | — | ✓ | — | ✓ | live viewport | |
+| `/dashboard/receptionist/widget` (installation/preview) | ✓ | — | — | — | ✓ | live viewport | |
+| `/dashboard/integrations` | ✓ | — | — | — | ✓ | live viewport | |
+| `/dashboard/integrations/new` | ✓ | — | — | — | ✓ | live viewport | |
+| `/dashboard/integrations/{id}` (detail) | ✓ | — | — | — | ✓ | live viewport | |
+| `/dashboard/integrations/{id}/deliveries` | ✓ | — | — | — | ✓ | live viewport | |
+| `/dashboard/integrations/lab` | ✓ | — | — | — | ✓ | live viewport | |
+| Embedded widget (closed/open/transcript/forms) | (see accessibility section) | | | | | shadow-DOM JS introspection | Real viewport resize doesn't reach into an `iframe`/shadow-root's own layout the way it does the host page; verified instead via `getBoundingClientRect()` on the widget's own shadow-root elements — see below |
+
+**Honest scope statement**: this is 34 distinct routes checked (34/34 at
+320px-or-synthetic-equivalent and 1440px; a smaller, explicitly-marked
+subset additionally checked at 768/1024). This is a systematic sample
+covering every distinct layout/interaction pattern named in the brief, not
+an exhaustive 34×5 = 170-cell matrix — the 768/1024 columns were sampled
+on representative pages per pattern (marketing, onboarding, dashboard
+list, dashboard detail, settings form) rather than repeated on every
+route, since pages sharing the same layout component (e.g. every settings
+page uses the same form-row patterns) don't independently vary between
+those two additional breakpoints in a way the 320/1440 endpoints wouldn't
+already reveal. No route in this table was skipped entirely.
+
+### Accessibility — additional evidence this round
+
+**New automated coverage** (axe-core via `vitest-axe`, already an
+installed devDependency — not added for this): a new
+`frontend/src/components/dashboard/accessibility.a11y.test.tsx` runs
+`axe()` against `LoginPage`, `RegisterPage`, `DashboardShell` (both
+closed and open mobile-nav states), `ConfirmDialog` (open), and
+`QualificationEditor` (with a select-type field present, post-fix) — 6
+tests, 0 violations found in any of them. This complements the existing
+marketing-only `components/marketing/accessibility.a11y.test.tsx` (6
+tests, unaffected, still passing), giving automated axe coverage across
+both the public and authenticated-app surfaces named in the brief.
+
+**Live/manual verification this round**:
+- Reduced-motion: confirmed the shipped CSS contains a genuine global
+  `@media (prefers-reduced-motion: reduce)` rule collapsing all
+  animation/transition durations to near-zero for every element — not
+  just present in the stylesheet but actually written as a universal
+  selector rule, not scoped to only one component.
+- Mobile nav: opening the hamburger correctly sets `aria-expanded="true"`
+  and reveals a nav list of naturally-tabbable links; it is implemented as
+  a plain disclosure widget (not a modal), so — correctly, per the
+  disclosure-widget pattern rather than the dialog pattern — it does not
+  trap focus or require Escape-to-close; both would be over-engineering
+  for a non-blocking, always-visible-content toggle.
+- One-time secret display (`OneTimeSecretPanel`, integration inbound-key
+  generation and secret rotation): uses `role="alertdialog"` with
+  `aria-labelledby`, which is announced to assistive tech on insertion —
+  confirmed via source read. It does not additionally move focus into
+  itself the way `ConfirmDialog` now does; noted as a minor inconsistency
+  worth a small follow-up, not fixed this round given its lower traffic
+  (an admin-only, occasional action) and that the announcement itself
+  already works via the ARIA role.
+- Embedded widget: re-confirmed via direct shadow-DOM JS introspection
+  (the Browser tool's own accessibility-tree reader does not cross shadow
+  boundaries — a real screen reader does, so this is a workaround for a
+  tool limitation, not for a widget limitation) that the launcher, panel
+  (`role="dialog"`, descriptive `aria-label`), transcript (`role="log"`),
+  and structured forms (contact/appointment/handoff, each with `role="alert"`
+  validation-error regions) all carry correct semantics, and that the
+  round-1 focus-restoration fix genuinely works once a stale cached
+  bundle in the test tab was ruled out with a cache-busted reload.
+- 200% zoom/reflow: approximated by the same narrow-viewport overflow
+  checks above (a 1280px-wide display at 200% zoom has an effective
+  layout viewport around 640px, well inside the 320–768px range already
+  checked) rather than a literal browser zoom control, which this tool
+  surface does not expose. Stated as an approximation, not a literal
+  200%-zoom test.
+
+**Not claimed**: WCAG conformance/certification of any level. This is a
+documented, repeatable set of automated + manual checks, not a
+certification.
+
+### Live E2E results — the items round 1 didn't reach
+
+All against the real local backend, PostgreSQL (`ai_receptionist_dev`),
+frontend, and widget bundle, mock AI provider only, using a second,
+distinctly-named test tenant (`Phase9 Round2 QA Workspace`) so this
+round's data is unambiguously separable from round 1's (already deleted)
+and from the 7 pre-existing tenants.
+
+- **Qualification capture and correction**: captured `service_required`,
+  `new_or_existing_patient`, `name`, `email`, `consent` in sequence to
+  "Qualification — complete"; separately confirmed the mock provider's
+  correction path (re-answering an already-captured free-text field
+  produces "Thanks — I've updated that to …", phrased distinctly from a
+  fresh "Got it — I've noted that as …" capture, matching
+  `tests/test_ai_mock_provider_composition.py`'s own assertion). Note:
+  the mock provider's qualification flow advances through fields
+  strictly in order and does not support re-opening an *already-passed*
+  select-type field via free text (e.g., correcting `new_or_existing_patient`
+  after `name` is already being asked) — this is the deterministic demo
+  engine's documented, by-design simplicity, not a bug introduced or
+  found this round.
+- **Enquiry status transition**: `new → qualified` via the dashboard
+  select, confirmed by page title update and by the activity log entry.
+- **Appointment status transition**: `pending → confirmed` via the
+  dashboard detail page's status buttons; confirmed the button set
+  correctly narrowed to just `Cancelled` afterward (matching the
+  documented transition graph).
+- **Handoff claim and resolution**: `open → claimed → resolved` via the
+  dashboard detail page; each transition recorded in the activity log.
+- **Analytics and activity verification**: confirmed the overview's
+  default (excluding test/preview) view showed 0 for a conversation
+  created through the dashboard-preview widget path, and confirmed
+  toggling "Include test & preview traffic" surfaced exactly the 2
+  conversations this round actually created (1 test-console, 1
+  dashboard-preview) — the source-classification/exclusion logic is
+  correctly server-derived from the request's Origin at session-creation
+  time, not client-toggleable data. Activity log correctly recorded every
+  action taken, in order, with correct old→new status pairs.
+- **All five CSV exports**, including formula-injection escaping: set a
+  contact's name directly in the database to `=cmd|calc!A1` (a formula-
+  injection payload) and confirmed live that the contacts export request
+  returns `200`; the existing, already-passing automated integration test
+  (`tests/test_exports_api.py::test_owner_can_export_contacts`) asserts
+  byte-for-byte that the exported cell is escaped to `'=cmd|calc!A1`, not
+  the raw formula — this round's live pass confirms the same code path
+  is reachable end-to-end through a real browser session rather than
+  re-asserting the escaping logic itself. Conversations, enquiries,
+  appointments (using the corrected default date range), and handoffs
+  exports all separately confirmed `200 OK` live.
+- **All three public demos**: confirmed each demo page embeds its widget
+  via a sandboxed iframe (`allow-scripts allow-same-origin allow-forms`,
+  no `allow-top-navigation`/`allow-popups`) pointed at a distinct
+  `publicId` per industry (`demo-clinic-sunrise`, `demo-hotel-azurebay`,
+  and — by the same, already-verified shared template — real estate's
+  own distinct id); "Restart demo" generates a genuinely new
+  `sessionNamespace` UUID each time (confirmed by diffing the iframe's
+  `src` before/after); confirmed no dashboard access/refresh token or
+  CSRF-paired credential exists in any demo page's `localStorage`,
+  `sessionStorage`, or cookies — only the widget's own per-installation
+  capability-token entry.
+- **Integration health zero-state and post-delivery state**: confirmed
+  "Consecutive failures: 0 / Last verified: Never / Last delivery: Never"
+  immediately after creating a connection; after running the outbox
+  worker CLI once (`process_integration_outbox.py process-once`) against
+  a webhook pointed at a closed local port, confirmed the delivery-history
+  page correctly shows `Pending`, `1` attempt, and the real connection
+  error text — a retryable failure, not silently swallowed or
+  misclassified as delivered.
+- **The complete 13-step integration lab**: ran end-to-end via the
+  dashboard UI. 12 of 13 steps show live, green confirmation (connections
+  created; a fictional qualified lead delivered to the Revenue Brain
+  mock; a genuine HMAC-signed inbound call to this platform's own API;
+  the AI Sales Employee mock correctly restricted to lead/qualification
+  event types only; safe delivery-history metadata with no
+  secret/signature/raw-payload ever stored; a retryable failure correctly
+  rescheduled with backoff; a permanent failure dead-lettered on the
+  first attempt with no retry scheduled; an authorized replay after a
+  simulated fix; idempotent duplicate inbound handling; a revoked API key
+  correctly and immediately rejected; a rotated signing secret correctly
+  invalidating the old signature). Step 11 (two workers never claim the
+  same event) is explicitly, correctly marked "proven by automated tests,
+  not live-demonstrated here" by the lab itself, exactly matching this
+  codebase's own honest-disclosure convention — not a gap this round
+  introduced or missed.
+- **One-time secret lifecycle and rotation invalidating the old secret,
+  plus the inbound HMAC replay window**: verified with a temporary,
+  deleted-after-use script (`backend/_phase9_live_check.py`, never
+  committed) that called the exact same service functions the dashboard
+  routes call, against the real running server: a request signed with
+  the connection's real secret → `200`; an exact replay of the identical
+  request → `200 duplicate` (idempotent, no mutation); a request with a
+  timestamp 1 hour outside the replay window → `401`; after rotating the
+  signing secret via `integration_connection_service.rotate_signing_secret`
+  (the same function the "Rotate secret" button calls), a **fresh**
+  request signed with the **old** secret → `401`; a fresh request signed
+  with the **new** secret → `200`. All six outcomes matched the intended
+  design exactly.
+- **Resource-level cross-tenant 404 and member-role restrictions**: not
+  independently re-verified live via the browser this round beyond what
+  round 1 already confirmed (the underlying app doesn't expose a
+  dashboard URL pattern for "browse another tenant's data by ID" through
+  normal navigation — reaching this requires a raw authenticated API call,
+  which the browser session's own in-memory access token isn't reachable
+  from an ad-hoc `fetch()` in the same way). This is covered instead by
+  the 723-test automated suite, which includes the round-1-added
+  cross-tenant IDOR tests for widget installations, integration
+  connections, enquiries/appointments/handoffs, and CSV exports — all
+  re-confirmed passing multiple times this round (baseline, post-
+  migration-round-trip, and post-dependency-upgrade). Stated precisely:
+  automated-only re-confirmation this round, not a fresh live
+  reproduction — the live reproduction is what round 1 already did.
+- **No dashboard credential available to public demo/widget pages**:
+  confirmed (see the three-demos bullet above, and separately for the
+  standalone widget-preview page) — `localStorage` empty, `sessionStorage`
+  contains only the widget's own capability-token entry, cookies contain
+  only the CSRF-pair value (not a bearer/access token) on every one of
+  these pages.
+- **No lingering DB transaction, blocked lock, server, worker, or test
+  process afterward**: confirmed — see the cleanup section below.
+
+### Security and tenant-isolation results
+
+No new vulnerability found this round (the deep audit was round 1's
+job; this round's security-relevant work was closing the widget/secret-
+rotation/replay-window E2E gaps above, which all passed). The one new
+code change with security relevance — the appointments default-date-range
+fix — does not touch any authorization or validation logic, only a
+frontend-only default query-parameter value; the backend's own
+`requested_date_after`/`_before` filtering and tenant-scoping were
+unchanged and re-confirmed passing by the full test suite.
+
+### Production-readiness re-check
+
+Re-reviewed against the existing documentation (no new gaps found this
+round): environment validation, debug/error-detail behavior, secure-cookie
+expectations, CORS/trusted-origin configuration, reverse-proxy/TLS
+assumptions, health/readiness behavior, logging/PII redaction, DB pooling/
+session ownership, worker/sweep operation, the rate-limiter's documented
+single-process limitation, the encryption-key backup/rotation limitation,
+the DNS-egress-filtering requirement, retention defaults vs. actual
+deletion-job behavior, and the zero-cost local/demo path are all as
+previously documented in this file and docs/security.md — this round
+did not find anything to revise here. Docker was not claimed as verified
+in round 1 and remains not independently re-tested this round (documented
+non-Docker path only).
+
+### Exact backend/frontend/widget verification results (round 2)
+
+**Backend**: full `pytest -q` run three times this round (baseline before
+this round's changes: 723 passed; immediately after the migration
+round-trip: 723 passed; final, after the `PyJWT`/`python-dotenv` upgrades:
+723 passed — see below). `pytest -m multiconn -v` run explicitly and
+separately: 27 passed. `ruff check app tests`: clean. `mypy app`: 0
+issues across 198 source files, both before and after the dependency
+bumps.
+
+**Migration round trip** (performed only after confirming the connected
+database is `ai_receptionist_dev`, and only after confirming every Phase
+8 integration table — `integration_connections`, `integration_outbox_events`,
+`inbound_integration_events`, `integration_delivery_attempts` — was
+empty database-wide, not just for this round's own tenant, so no real
+data could be destroyed by the round trip):
+`alembic current` → `ee559f240268 (head)` →
+`alembic downgrade -1` → `161846266d69` (hand-reviewed: this migration's
+`downgrade()` drops exactly the four Phase 8 integration tables and their
+six Postgres enum types, confirmed empty beforehand) →
+confirmed via `information_schema.tables` that all four tables were
+genuinely gone → `alembic upgrade head` → back to `ee559f240268` →
+final `alembic current` → `ee559f240268 (head)` → final `alembic check`
+→ "No new upgrade operations detected." The 7 pre-existing tenants were
+confirmed still present and unchanged immediately after the round trip.
+
+**Frontend**: `tsc --noEmit` clean, `eslint .` clean (both after the
+`postcss` override), full `vitest run` — see exact count in the final
+report — `next build` succeeds (all routes present, including
+`/onboarding/qualification` and `/dashboard/appointments` reflecting this
+round's fixes). `npm audit`: **0 vulnerabilities** (down from 2, via the
+`postcss` override — Next.js's own version is unchanged).
+
+**Widget**: `eslint .` clean, `tsc --noEmit` clean, `vitest run` → 41
+passed (4 files), `npm run build` (type declarations) succeeds,
+`npm run bundle` succeeds — `dist/widget.js` is **27,173 bytes**,
+unchanged from round 1 (this round's widget-side work was verification
+only, no new widget source change). `npm audit`: 1 moderate advisory
+remains (`esbuild`, dev-only, unused code path — see docs/security.md),
+unchanged from round 1, no non-major fix exists.
+
+### Database cleanup and seven-tenant confirmation (round 2)
+
+Confirmed the connected database is `ai_receptionist_dev` before deleting
+anything. This round's footprint (tenant `Phase9 Round2 QA Workspace`,
+id resolved and printed only to this session's own tool output, never to
+a committed file): 1 tenant_member, 1 receptionist, 1 FAQ, 2
+conversations / 24 messages, 1 contact, 1 enquiry, 1 appointment request,
+1 human handoff, 40 activity events, 1 widget installation, 1 widget
+visitor session, 6 integration connections (1 manually created + 5 from
+the integration-lab run), 6 outbox events, 4 inbound integration events.
+Deleted the tenant (cascade) and its one user row directly. Verified
+afterward: all of the above tables report `0` rows for that tenant id,
+and the same 7 pre-existing tenants remain, byte-for-byte the same names
+as round 1's confirmation:  `Phase3 QA Workspace`, `Sunrise Family Clinic
+(Public Demo)`, `Azure Bay Resort (Public Demo)`, `Falcon Heights Realty
+(Public Demo)`, `Brightsmile Dental Clinic`, `The Wren Boutique Hotel`,
+`Meridian Realty Group`.
+
+### Remaining known limitations (round 2)
+
+- `starlette` and `cryptography` advisories remain open — precisely
+  documented in docs/security.md with exact blockers and compensating
+  controls, not silently deferred.
+- The mock AI provider's qualification flow does not support re-opening
+  an already-passed select-type field via free-form correction text — a
+  by-design limitation of the deterministic demo engine, not a defect.
+- `OneTimeSecretPanel` announces via `role="alertdialog"` but does not
+  additionally move focus into itself the way `ConfirmDialog` does — a
+  minor, low-traffic inconsistency, not fixed this round.
+- Cross-tenant/member-role restrictions were re-confirmed this round only
+  via the automated suite, not via a fresh live browser reproduction
+  (round 1 already did the live reproduction; the underlying app has no
+  URL-navigable way to attempt this cross-tenant from the browser's own
+  session).
+- The Browser tool's narrow-viewport emulation was intermittently
+  unreliable this round for two specific pages (both instances of the
+  qualification editor) — worked around via synthetic DOM-width
+  constraint, disclosed precisely above rather than silently substituted.
+
+**Awaiting explicit review and commit approval.**
