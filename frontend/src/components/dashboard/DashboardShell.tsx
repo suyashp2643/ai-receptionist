@@ -18,6 +18,7 @@ const NAV = [
   { href: "/dashboard/appointments", label: "Appointments" },
   { href: "/dashboard/handoffs", label: "Handoffs" },
   { href: "/dashboard/activity", label: "Activity" },
+  { href: "/dashboard/integrations", label: "Integrations" },
   { href: "/dashboard/settings/business-profile", label: "Settings" },
   { href: "/dashboard/receptionist/test", label: "Test console" },
   { href: "/dashboard/receptionist/widget", label: "Widget" },

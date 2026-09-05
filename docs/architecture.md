@@ -98,14 +98,16 @@ OAuth in the MVP. The auth module is isolated behind three replaceable seams
 swapped for shared AI Business Engine authentication without touching
 tenant/permission logic. Full detail: `docs/security.md`.
 
-## Integration secrets (deferred to Phase 8)
+## Integration secrets (implemented — Phase 8)
 
-Per approved Decision 2, `IntegrationConnection` (introduced in a later phase)
-will store only non-sensitive metadata and status in Phase 1–7. No secret
-storage mechanism is implemented yet. **Future requirement to satisfy before
-Phase 8 ships:** integration credentials must be encrypted at rest (e.g. via
-an application-level envelope key or a secrets manager) — never plaintext in
-the database, never placeholder values checked into config.
+`IntegrationConnection` stores an outbound webhook signing secret as
+Fernet ciphertext (`app/core/crypto.py`), never plaintext, gated behind
+`Settings.require_integration_encryption_key()` — a connector requiring a
+signing secret cannot be created at all if `INTEGRATION_ENCRYPTION_KEY` is
+unset. An inbound API key is never stored in any form except its SHA-256
+hash, and is returned to the caller exactly once at creation/rotation
+time. See `docs/integration-contracts.md` and `docs/security.md`'s Phase 8
+section for the full design.
 
 ## Tenant isolation model (implemented — Phase 2, extended in Phase 3)
 
@@ -1051,3 +1053,98 @@ shape: one `POST`, no `GET`, reusing Phase 3's plain-text validation
 policy and a new IP-only-keyed variant of the existing
 `app/core/rate_limit.py` dependency (the widget's version keys on an
 installation, which doesn't exist for this route).
+
+## Secure integration foundation (implemented — Phase 8)
+
+Connects AI Receptionist to Revenue Brain, a future AI Sales Employee
+product, and any tenant's own webhook receiver — without this repository
+importing from or coupling to either other product's codebase. The full
+external-facing contract lives in `docs/integration-contracts.md`; this
+section covers the internal shape.
+
+### Transactional outbox, not a message broker
+
+Zero paid infrastructure, matching every other phase's constraint: no
+Kafka/RabbitMQ/Celery. `app/services/outbox_producer_service.py` writes
+one `IntegrationOutboxEvent` row per (domain event, subscribed
+connection) pair, in the same transaction as the domain mutation that
+triggered it — via `INSERT ... ON CONFLICT DO NOTHING` against a
+tenant+connection+dedup-key unique constraint, so a retried request
+handler produces at most one row per connection with no read-then-write
+race. Production is wired directly into `contact_service`,
+`enquiry_service`, `appointment_request_service`, `human_handoff_service`,
+and `app/ai/orchestrator.py` — always as plain `db.add`/`db.execute`
+calls inserted immediately before each call site's existing commit
+boundary, never a network call, and never introducing a new lock-hold
+duration beyond what that transaction already had.
+
+`app/services/outbox_worker_service.py` is the delivery half, and
+deliberately mirrors the orchestrator's own 3-phase-commit discipline
+(see this document's Phase 4 section): claim a bounded batch via
+`FOR UPDATE SKIP LOCKED` in one short transaction (a lease-expiry check
+recovers rows from a crashed worker), make the actual HTTP call entirely
+outside any DB session, then record the outcome in a third short
+transaction. `tests/integration/test_phase8_outbox_worker.py` proves —
+with two real, separate connections claiming from the same backlog
+concurrently — that a row is never claimed twice and no lock or idle
+transaction survives a run.
+
+### Versioned envelope, connectors, and SSRF policy
+
+`app/integrations/envelope.py` defines a stable wire envelope and twelve
+closed, independently-versioned payload schemas. `app/integrations/connectors/`
+implements the connector abstraction (`base.py`) and four connector
+types — `mock` (zero-network, deterministic), `webhook` (generic
+HMAC-signed HTTPS POST), `revenue_brain` and `sales_employee` (same
+mechanism, own identity and, for Sales Employee, a restricted event-type
+allow-list). Every webhook-family destination is validated by
+`app/core/ssrf_guard.py` — scheme allow-listing, embedded-credential
+rejection, `ipaddress`-based rejection of loopback/link-local/private/
+reserved/multicast/unspecified ranges (including IPv4-mapped IPv6), and
+hostname normalization — both at config-save time and immediately before
+every delivery attempt. `app/integrations/pinned_transport.py` then pins
+the actual TCP connection to exactly the address just validated (a custom
+`httpcore.NetworkBackend`, TLS SNI/hostname verification unaffected since
+those are always derived from the request's own origin host, not from
+what the backend dials), closing the TOCTOU gap between validation and
+connection. See `docs/security.md`'s Phase 8 section for the full
+threat-model writeup, including the one honestly-documented residual
+limitation this cannot close (a DNS answer that is already compromised at
+the exact moment validation performs its own resolution) and the
+production-deployment requirement for network-level egress filtering
+alongside this application-level pinning.
+
+### Dashboard, lab, and health/observability
+
+Every connection is managed from the authenticated dashboard
+(`frontend/src/app/(app)/dashboard/integrations/*`) — list, create, a
+detail page (config, event subscriptions with inline PII/safety
+warnings, field-mapping preview, secret rotation, inbound-key
+generation), and a delivery-history page with dead-letter replay.
+`/dashboard/integrations/lab` is a zero-network demonstration built
+entirely on the `mock` connector type, including genuine client-side
+HMAC-SHA256 request signing (`frontend/src/lib/hmac-sign.ts`, matching
+`app/integrations/signing.py` byte-for-byte) for a real authenticated
+call to this app's own inbound API. `app/services/integration_health_service.py`
+computes a tenant-scoped health/metrics summary (connection status
+breakdown, backlog, dead-letter count, success rate, delivery-latency
+percentiles, structured warnings) in a fixed, small number of queries
+regardless of data volume (`tests/test_phase8_integration_health_performance.py`
+asserts an exact bounded count) — every rate/latency figure is `null`,
+never a misleading `0`, when there's no data to compute it from.
+`app/services/conversation_sweep_service.py` is the explicit (CLI-only,
+no automatic scheduler) producer for `conversation.abandoned` — see
+`docs/integration-contracts.md` §9 for the full writeup of all three.
+
+### Inbound API: narrow by construction
+
+`app/api/v1/integrations_inbound.py` has no `{tenant_id}` in its URL —
+tenant scope is resolved entirely from the API-key credential
+(`app/services/integration_inbound_service.py`), authenticated by the
+same HMAC scheme outbound deliveries use. It accepts a closed, two-value
+event-type allow-list and can never mutate a business record: processing
+an inbound event only ever writes an append-only `InboundIntegrationEvent`
+row and an `ActivityEvent` — it never calls into
+`enquiry_service`/`appointment_request_service`/`human_handoff_service`.
+This is a deliberate Phase 8 scope boundary, not an oversight — seen
+again in `docs/integration-contracts.md`.

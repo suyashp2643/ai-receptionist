@@ -699,6 +699,81 @@ docs/local-development.md — a deliberate choice over building an
 under-scoped internal admin/read surface for this phase; see
 docs/security.md's Phase 7 threat model for the reasoning.
 
+## Integrations management (dashboard, authenticated) (Phase 8)
+
+| Method | Path | Role |
+|---|---|---|
+| GET | `/api/v1/tenants/{id}/integrations` | any active member |
+| POST | `/api/v1/tenants/{id}/integrations` | owner/admin |
+| GET | `/api/v1/tenants/{id}/integrations/{connection_id}` | any active member |
+| PUT | `/api/v1/tenants/{id}/integrations/{connection_id}` | owner/admin |
+| POST | `/api/v1/tenants/{id}/integrations/{connection_id}/rotate-secret` | owner/admin |
+| POST | `/api/v1/tenants/{id}/integrations/{connection_id}/inbound-key` | owner/admin |
+| POST | `/api/v1/tenants/{id}/integrations/{connection_id}/pause` | owner/admin |
+| POST | `/api/v1/tenants/{id}/integrations/{connection_id}/resume` | owner/admin |
+| POST | `/api/v1/tenants/{id}/integrations/{connection_id}/disable` | owner/admin |
+| POST | `/api/v1/tenants/{id}/integrations/{connection_id}/verify` | owner/admin |
+| POST | `/api/v1/tenants/{id}/integrations/{connection_id}/test-event` | owner/admin |
+| GET | `/api/v1/tenants/{id}/integrations/{connection_id}/deliveries` | any active member |
+| POST | `/api/v1/tenants/{id}/integrations/{connection_id}/deliveries/{event_id}/replay` | owner/admin |
+| GET | `/api/v1/tenants/{id}/integrations/health` | any active member |
+| POST | `/api/v1/tenants/{id}/integrations/{connection_id}/preview-mapping` | owner/admin |
+| POST | `/api/v1/tenants/{id}/integrations/{connection_id}/process-pending` | owner/admin |
+
+`GET .../integrations/health` accepts `?window_hours=` (default 24, max
+168) and returns the tenant-scoped summary described in
+`docs/integration-contracts.md` §9 — connection status breakdown,
+backlog, dead-letter count, success rate, delivery-latency percentiles,
+and structured warnings; every rate/latency field is `null`, not `0`,
+when there's no data. `POST .../preview-mapping` applies this
+connection's field-mapping rules (or ones supplied in the request body)
+to fictional sample data supplied in the request and returns the
+transformed result — no real event is touched. `POST .../process-pending`
+runs a single, synchronous, connection-scoped delivery pass (claim →
+attempt → record outcome, exactly once, using the same worker logic as
+the background process) so the dashboard/lab can demonstrate delivery
+without the separate worker process running; it never touches another
+connection's or another tenant's backlog.
+
+Non-member: `404` (never `403` — a non-member cannot distinguish "exists,
+no access" from "doesn't exist"). Unauthenticated: `401`. Every mutating
+action (`PUT`/`rotate-secret`/`inbound-key`/`pause`/`resume`/`disable`)
+requires `expected_version` in the body and returns `409` on a stale
+version, same optimistic-concurrency contract as every other Phase 6
+status-update endpoint.
+
+`POST .../integrations` body:
+```json
+{
+  "connector_type": "mock | webhook | revenue_brain | sales_employee",
+  "name": "string, max 200",
+  "config": { "destination_url": "https://...", "custom_headers": {}, "field_mapping": {} },
+  "enabled_event_types": ["enquiry.qualified", "..."],
+  "signing_secret": "required for webhook/revenue_brain/sales_employee"
+}
+```
+`config`/`enabled_event_types`/`signing_secret` never come back in any
+response body except that a `has_signing_secret: true/false` flag and,
+for `enabled_event_types`, the list itself, are shown — the secret's
+actual value is never returned by any route. `POST .../inbound-key`
+returns the raw API key in its response body **exactly once**:
+```json
+{ "api_key": "airk_...", "prefix": "airk_", "last_four": "a1b2" }
+```
+No other route, including the detail `GET`, ever returns `api_key`
+again — only `inbound_api_key_prefix`/`inbound_api_key_last_four`.
+
+## Integrations inbound API (API key + HMAC signature, no dashboard JWT) (Phase 8)
+
+| Method | Path | Auth |
+|---|---|---|
+| POST | `/api/v1/integrations/inbound/events` | `X-Integration-Api-Key` + HMAC signature |
+
+No `{tenant_id}` in the path — tenant scope comes entirely from the
+resolved connection. See `docs/integration-contracts.md` §5-6 for the
+full request/response contract, signing scheme, idempotency semantics,
+and the deliberate "never mutates a business record" scope boundary.
+
 ## Error shape
 
 Every error response (from `app/core/errors.py`) has the same shape:
@@ -708,7 +783,7 @@ Every error response (from `app/core/errors.py`) has the same shape:
 (422 validation errors additionally include `"details": [...]` — the
 Pydantic error list, safely JSON-encoded via `jsonable_encoder`.)
 
-## Not implemented in Phase 5/6/7
+## Not implemented in Phase 5/6/7/8
 
 Billing/subscriptions or any payment processing (the Phase 7 pricing page
 shows explicitly-placeholder prices and has no checkout flow), actual
@@ -717,8 +792,7 @@ requests are always `pending` until a human explicitly confirms them —
 structured service/location *selection* is implemented, but selecting one
 is never a real availability check), sending real email (including no
 email-sending integration for public leads — see the leads section
-above), CRM synchronization, Revenue Brain / AI Sales Employee
-integration, paid AI provider usage by default, paid analytics, an
+above), paid AI provider usage by default, paid analytics, an
 automated data-retention/deletion job (defaults are declared and
 configurable; nothing executes them yet — see `docs/security.md`), and any
 production hosting/domain/CDN for the public marketing site (it runs
@@ -728,6 +802,21 @@ embeddings, website crawling, document parsing, and server-side voice
 processing are likewise still out of scope; browser-native voice (Web
 Speech API) is implemented in the widget bundle only, with no server-side
 counterpart.
+
+Revenue Brain / AI Sales Employee **outbound integration is now
+implemented** (Phase 8, see above and `docs/integration-contracts.md`) —
+the connector/envelope/delivery/inbound API foundation, the dashboard UI
+for managing connections (`/dashboard/integrations/*`), the zero-network
+integration lab, tenant-scoped health/observability, and an explicit
+CLI-only producer for `conversation.abandoned`
+(`scripts/sweep_stale_conversations.py` — no automatic scheduler; see
+`docs/integration-contracts.md` §9) are all real, not placeholder. What
+Phase 8 still does **not** include: any autonomous outbound
+messaging/calling capability on the Sales Employee side — this codebase
+only ever sends read-only event notifications, never triggers an action
+on a lead — and multi-key secret rotation (rotating
+`INTEGRATION_ENCRYPTION_KEY` requires re-entering every stored signing
+secret).
 
 Phase 6 specifically does not include: a tenant-switcher UI (a user
 belonging to more than one tenant can only reach the first one in their

@@ -76,6 +76,8 @@ from app.ai.system_instructions import build_system_instruction
 from app.ai.tools.base import ToolContext, execute_tool
 from app.ai.tools.registry import PHASE_4_TOOL_NAMES, TOOL_REGISTRY
 from app.core.allowlists import MANDATORY_SAFETY_RULES
+from app.integrations import payload_builders
+from app.integrations.envelope import EventType
 from app.models.conversation import Conversation
 from app.models.conversation_message import ConversationMessage
 from app.models.conversation_summary import ConversationSummary
@@ -91,6 +93,7 @@ from app.repositories.conversation import (
 from app.repositories.industry_template import IndustryTemplateRepository
 from app.repositories.receptionist import ReceptionistRepository, ReceptionistWorkflowRepository
 from app.schemas.qualification import QualificationSchema
+from app.services import outbox_producer_service
 
 logger = logging.getLogger("app.ai.orchestrator")
 
@@ -413,6 +416,27 @@ class ConversationOrchestrator:
             triggered_categories.append(safety_directive.category)
             safety_state["triggered_categories"] = triggered_categories[-20:]
             conversation.safety_state = safety_state
+            # Phase 8: notify subscribed connections a safety-relevant
+            # response was used. Pure DB work (no network call) — safe to
+            # do while this phase's row lock is held, same as the audit
+            # message write just above; the actual outbound delivery
+            # attempt happens later, entirely outside this transaction, in
+            # app/services/outbox_worker_service.py. Never includes the
+            # triggering message text — see payload_builders and
+            # envelope.py's PII policy.
+            outbox_producer_service.produce_event(
+                self.db,
+                tenant_id=self.tenant_id,
+                event_type=EventType.SAFETY_ESCALATION_DETECTED,
+                payload=payload_builders.safety_escalation_detected(
+                    conversation_id=conversation_id,
+                    receptionist_id=receptionist.id,
+                    category=safety_directive.category,
+                    channel=conversation.channel.value,
+                ),
+                dedup_key=f"safety.escalation_detected:{conversation_id}:{sequence_number}",
+                correlation_id=conversation_id,
+            )
         self.db.commit()
 
         # Step 5 + 11: tool gating — only when the workflow allows
@@ -765,6 +789,22 @@ class ConversationOrchestrator:
         self.summary_repo.add(summary)
         conversation.status = ConversationStatus.COMPLETED
         conversation.completed_at = _utcnow()
+
+        _, message_count = self.message_repo.list_for_conversation(conversation_id, limit=1, offset=0)
+        outbox_producer_service.produce_event(
+            self.db,
+            tenant_id=self.tenant_id,
+            event_type=EventType.CONVERSATION_COMPLETED,
+            payload=payload_builders.conversation_completed(
+                conversation_id=conversation_id,
+                receptionist_id=conversation.receptionist_id,
+                mode=conversation.mode.value,
+                channel=conversation.channel.value,
+                message_count=message_count,
+            ),
+            dedup_key=f"conversation.completed:{conversation_id}",
+        )
+
         self.db.flush()
         self.db.refresh(conversation)
         self.db.refresh(summary)

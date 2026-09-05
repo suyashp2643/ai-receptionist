@@ -12,6 +12,12 @@ from app.models.enquiry import Enquiry
 from app.models.faq import FAQ
 from app.models.human_handoff import HumanHandoff
 from app.models.industry_template import IndustryTemplate
+from app.models.integration import (
+    InboundIntegrationEvent,
+    IntegrationConnection,
+    IntegrationDeliveryAttempt,
+    IntegrationOutboxEvent,
+)
 from app.models.internal_note import InternalNote
 from app.models.knowledge import KnowledgeChunk, KnowledgeDocument, KnowledgeSource
 from app.models.public_lead import PublicLead
@@ -52,4 +58,8 @@ __all__ = [
     "InternalNote",
     "ActivityEvent",
     "PublicLead",
+    "IntegrationConnection",
+    "IntegrationOutboxEvent",
+    "IntegrationDeliveryAttempt",
+    "InboundIntegrationEvent",
 ]

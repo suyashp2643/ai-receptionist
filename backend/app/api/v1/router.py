@@ -11,6 +11,8 @@ from app.api.v1 import (
     faqs,
     health,
     industry_templates,
+    integrations,
+    integrations_inbound,
     knowledge,
     locations,
     notes,
@@ -48,3 +50,5 @@ api_router.include_router(notes.router, tags=["notes"])
 api_router.include_router(activity.router, tags=["activity"])
 api_router.include_router(exports.router, tags=["exports"])
 api_router.include_router(public_leads.router, tags=["public-leads"])
+api_router.include_router(integrations.router, tags=["integrations"])
+api_router.include_router(integrations_inbound.router, tags=["integrations-inbound"])

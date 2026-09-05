@@ -142,6 +142,59 @@ class Settings(BaseSettings):
     # back a client asks — see app/services/analytics_service.py.
     analytics_max_range_days: int = 366
 
+    # --- Integrations / webhooks (Phase 8) ---
+    # A Fernet key (32 url-safe base64-encoded bytes — generate with
+    # `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`)
+    # used to encrypt outbound webhook signing secrets at rest. Deliberately
+    # has NO default: a missing key must fail secret-dependent operations
+    # loudly (see require_integration_encryption_key below), never silently
+    # store a secret in plaintext or skip encryption. Rotation is supported
+    # via integration_encryption_key_version below — this codebase does not
+    # attempt multi-key rotation logic itself (see docs/security.md), but
+    # every encrypted value records which key version it was encrypted
+    # under so a future rotation job has something to key off of.
+    integration_encryption_key: str | None = None
+    integration_encryption_key_version: int = 1
+    # Inbound API keys are prefixed with this string before the random
+    # part, purely so a leaked key is recognizable by pattern (e.g. in a
+    # secret-scanning tool) — the prefix itself carries no security value.
+    integration_api_key_prefix: str = "airk_"
+    # SSRF policy (app/core/ssrf_guard.py). Production must reject plain
+    # HTTP entirely; this flag exists ONLY so local development can point a
+    # webhook connector at a loopback receiver without HTTPS. Never set
+    # True outside development — see the guard's own docstring for the
+    # full policy this toggles.
+    integration_allow_http_for_loopback: bool = True
+    # Outbound HTTP delivery timeouts — bounded deliberately low so one
+    # slow/unresponsive receiver can never stall the worker's batch past a
+    # few seconds; a receiver needing longer should be marked failing and
+    # retried, not waited on synchronously.
+    integration_delivery_connect_timeout_seconds: float = 3.0
+    integration_delivery_read_timeout_seconds: float = 5.0
+    # Retry policy defaults (overridable per connection within these
+    # bounds — see IntegrationConnection.retry_policy). Exponential backoff
+    # with jitter; see app/integrations/backoff.py for the exact formula.
+    integration_max_delivery_attempts: int = 8
+    integration_backoff_base_seconds: float = 2.0
+    integration_backoff_max_seconds: float = 900.0
+    # A claimed-but-undelivered outbox row is presumed abandoned (worker
+    # crashed) after this many seconds and becomes eligible for another
+    # worker to claim — see the FOR UPDATE SKIP LOCKED claim query in
+    # app/services/outbox_worker_service.py.
+    integration_lease_seconds: int = 120
+    # Upper bound on how many outbox rows a single worker batch claims at
+    # once — keeps one poll iteration's work (and its eventual HTTP calls)
+    # bounded regardless of backlog size.
+    integration_worker_batch_size: int = 25
+    # Hard ceilings enforced at write time, independent of any one
+    # connector's own limits — a misconfigured or malicious mapping/payload
+    # must never grow the outbox or delivery-history tables unboundedly.
+    integration_max_payload_bytes: int = 65_536
+    integration_max_mapping_bytes: int = 8_192
+    integration_max_mapping_depth: int = 4
+    integration_max_enabled_event_types: int = 50
+    integration_max_delivery_history_days: int = 90
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()]
@@ -169,6 +222,20 @@ class Settings(BaseSettings):
                 "(see .env.example) before using authentication endpoints."
             )
         return self.jwt_secret_key
+
+    def require_integration_encryption_key(self) -> str:
+        """Same lazy-fail-at-call-time shape as require_jwt_secret() above.
+        Any code path that would otherwise store a signing secret must call
+        this first and let it raise — never fall back to storing plaintext
+        or silently skipping encryption."""
+        if not self.integration_encryption_key:
+            raise RuntimeError(
+                "INTEGRATION_ENCRYPTION_KEY is not set. Generate one with "
+                '`python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` '
+                "and set it in backend/.env (see .env.example) before creating a connector "
+                "that stores a signing secret."
+            )
+        return self.integration_encryption_key
 
 
 @lru_cache

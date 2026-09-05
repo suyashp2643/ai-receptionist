@@ -42,9 +42,12 @@ from datetime import UTC, datetime
 from sqlalchemy.orm import Session
 
 from app.core.normalization import normalize_email, normalize_phone
+from app.integrations import payload_builders
+from app.integrations.envelope import EventType
 from app.models.contact import Contact
 from app.models.enums import PreferredContactMethod
 from app.repositories.contact import ContactRepository
+from app.services import outbox_producer_service
 
 
 def capture_contact(
@@ -99,4 +102,15 @@ def capture_contact(
     )
     repo.add(contact)
     db.flush()
+    # Only a genuinely NEW contact fires contact.captured (Phase 8) — the
+    # dedup-match branch above updates an existing contact on a repeat
+    # submission, which is not a new capture and must not re-notify.
+    outbox_producer_service.produce_event(
+        db,
+        tenant_id=tenant_id,
+        event_type=EventType.CONTACT_CAPTURED,
+        payload=payload_builders.contact_captured(contact),
+        dedup_key=f"contact.captured:{contact.id}",
+        correlation_id=conversation_id,
+    )
     return contact

@@ -81,6 +81,7 @@ describe("DashboardShell — unified across old and new pages", () => {
     expect(screen.getByRole("link", { name: "Settings" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Test console" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Widget" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Integrations" })).toBeInTheDocument();
   });
 
   it("supports mobile navigation via the hamburger toggle", async () => {

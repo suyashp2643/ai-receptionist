@@ -19,10 +19,13 @@ from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
+from app.integrations import payload_builders
+from app.integrations.envelope import EventType
+from app.models.contact import Contact
 from app.models.enums import HandoffStatus, PreferredContactMethod
 from app.models.human_handoff import HumanHandoff
 from app.repositories.human_handoff import HumanHandoffRepository
-from app.services import activity_service
+from app.services import activity_service, outbox_producer_service
 from app.services.concurrency import apply_versioned_update
 
 HANDOFF_STATUS_TRANSITIONS: dict[HandoffStatus, frozenset[HandoffStatus]] = {
@@ -84,6 +87,15 @@ def create_handoff_request(
     )
     repo.add(handoff)
     db.flush()
+    contact = db.get(Contact, contact_id) if contact_id else None
+    outbox_producer_service.produce_event(
+        db,
+        tenant_id=tenant_id,
+        event_type=EventType.HUMAN_HANDOFF_REQUESTED,
+        payload=payload_builders.human_handoff_requested(handoff, contact=contact),
+        dedup_key=f"human_handoff.requested:{handoff.id}",
+        correlation_id=conversation_id,
+    )
     return handoff
 
 
@@ -105,6 +117,13 @@ def claim(db: Session, *, tenant_id: uuid.UUID, actor_user_id: uuid.UUID, handof
         entity_type="human_handoff",
         entity_id=handoff.id,
         metadata={"from": HandoffStatus.OPEN.value, "to": HandoffStatus.CLAIMED.value},
+    )
+    outbox_producer_service.produce_event(
+        db,
+        tenant_id=tenant_id,
+        event_type=EventType.HUMAN_HANDOFF_STATUS_CHANGED,
+        payload=payload_builders.human_handoff_status_changed(handoff, previous_status=HandoffStatus.OPEN.value),
+        dedup_key=f"human_handoff.status_changed:{handoff.id}:{handoff.version}",
     )
     db.flush()
     return handoff
@@ -146,6 +165,13 @@ def update_status(
         entity_type="human_handoff",
         entity_id=handoff.id,
         metadata={"from": current.value, "to": new_status.value},
+    )
+    outbox_producer_service.produce_event(
+        db,
+        tenant_id=tenant_id,
+        event_type=EventType.HUMAN_HANDOFF_STATUS_CHANGED,
+        payload=payload_builders.human_handoff_status_changed(handoff, previous_status=current.value),
+        dedup_key=f"human_handoff.status_changed:{handoff.id}:{handoff.version}",
     )
     db.flush()
     return handoff

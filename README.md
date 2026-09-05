@@ -5,16 +5,25 @@ industry templates (real estate, clinics, hotels, restaurants, automotive,
 law firms, education, home services, SaaS, custom) configure it via data,
 not forked code.
 
-Status: **Phase 7 — a public marketing website (Next.js route group,
-centralized branding/pricing/SEO configuration) and three interactive
-industry demos (clinic, hotel, real estate) embedding the real public
-widget against dedicated fictional tenants, plus a zero-cost public
-lead-capture endpoint — on top of Phase 6's client operations dashboard:
-real analytics, conversation/contact/enquiry/appointment/handoff
-management, internal notes, an audit log, role-based permissions, and CSV
-export, itself on top of Phase 5's public embeddable website widget,
-browser voice, secure public conversations, contact capture, appointment
-requests, human handoff, and installation management**. See
+Status: **Phase 8 — a secure integration foundation (versioned event
+envelope/connectors/transactional outbox/delivery worker, SSRF-guarded
+webhook delivery, encrypted secrets, a narrow authenticated inbound API)
+connecting to Revenue Brain and a future AI Sales Employee product,
+without importing from or coupling to either — on top of Phase 7's public
+marketing website (Next.js route group, centralized branding/pricing/SEO
+configuration) and three interactive industry demos (clinic, hotel, real
+estate) embedding the real public widget against dedicated fictional
+tenants, plus a zero-cost public lead-capture endpoint, itself on top of
+Phase 6's client operations dashboard: real analytics,
+conversation/contact/enquiry/appointment/handoff management, internal
+notes, an audit log, role-based permissions, and CSV export, itself on
+top of Phase 5's public embeddable website widget, browser voice, secure
+public conversations, contact capture, appointment requests, human
+handoff, and installation management**. The Phase 8 backend (API,
+worker, CLI), its dashboard frontend UI (`/dashboard/integrations/*`,
+including a zero-network integration lab and tenant-scoped
+health/observability), and an explicit CLI-only producer for stale-
+conversation abandonment are all complete and tested. See
 [docs/PROGRESS.md](docs/PROGRESS.md) for what's implemented so far,
 [docs/architecture.md](docs/architecture.md) for the system design, and
 [docs/security.md](docs/security.md) for the auth/tenant-isolation/public-widget
@@ -55,10 +64,26 @@ threat model.
   dashboard live-preview mechanism); a global, non-tenant-owned
   `public_leads` model behind a rate-limited, honeypot-protected endpoint
   with no public read API
-- Zero-cost by design through Phase 7: no paid APIs, no external embeddings,
-  no telephony/SMS/email providers, no paid analytics/fonts/hosting —
-  deterministic local chunking + PostgreSQL full-text search for knowledge,
-  deterministic mock AI provider, browser-native (not server-side) voice
+- Secure integration foundation (Phase 8): a versioned event envelope and
+  twelve outbound event types (`app/integrations/envelope.py`), four
+  connector types (mock/webhook/revenue_brain/sales_employee) sharing one
+  HMAC-SHA256 signing scheme, a transactional outbox +
+  `FOR UPDATE SKIP LOCKED` delivery worker (no message broker — see
+  `scripts/process_integration_outbox.py`), an SSRF guard
+  (`app/core/ssrf_guard.py`) rejecting private/loopback/link-local/
+  reserved ranges plus connection-level IP pinning to close the
+  validate-then-connect TOCTOU gap, Fernet-encrypted secrets at rest, and
+  a narrow, API-key-authenticated inbound API that can never mutate a
+  business record — all managed from an authenticated dashboard UI
+  (`/dashboard/integrations/*`) with a one-click, zero-network
+  integration lab and tenant-scoped health/observability. Full contract:
+  `docs/integration-contracts.md`.
+- Zero-cost by design through Phase 8: no paid APIs, no external embeddings,
+  no telephony/SMS/email providers, no paid analytics/fonts/hosting, no
+  message broker — deterministic local chunking + PostgreSQL full-text
+  search for knowledge, deterministic mock AI provider, browser-native
+  (not server-side) voice, an in-process outbox worker instead of Kafka/
+  RabbitMQ/Celery
 
 ## Repository layout
 

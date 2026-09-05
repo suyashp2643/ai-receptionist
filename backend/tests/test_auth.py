@@ -45,6 +45,49 @@ def test_registration_succeeds_and_returns_no_password_hash(db_backed_client: Te
     assert response.cookies[settings.refresh_cookie_name] not in str(body)
 
 
+def _set_cookie_header_for(response, cookie_name: str) -> str:
+    """Returns the raw `Set-Cookie` response header for `cookie_name` — needed
+    because httpx's parsed `response.cookies` jar discards the `Path`
+    attribute, which is exactly what a Phase 8 remediation round found
+    broken: the CSRF cookie was scoped to `Path=/api/v1/auth`, a backend-only
+    path the frontend (a separate origin, with pages at `/dashboard/*`,
+    `/login`, etc.) never visits — so `document.cookie` on any real frontend
+    page could never see it, `readCookie()` always returned null, every
+    silent refresh sent no `X-CSRF-Token` header, and `verify_csrf` correctly
+    rejected it with 403. That bug was invisible to every pre-existing test
+    in this file because they only ever assert via `response.cookies`/
+    `client.cookies`, which don't model per-page-path visibility the way a
+    real browser's `document.cookie` does — asserting on the raw header is
+    the only way this suite actually proves the Path is correct."""
+    headers = [
+        v for k, v in response.headers.multi_items() if k.lower() == "set-cookie" and v.startswith(f"{cookie_name}=")
+    ]
+    assert headers, f"No Set-Cookie header found for {cookie_name!r}"
+    return headers[0]
+
+
+def test_csrf_cookie_is_readable_from_any_frontend_page_path(db_backed_client: TestClient):
+    """Regression test for the Phase 8 remediation round's root-cause fix —
+    see `app/api/cookies.py`'s `_CSRF_COOKIE_PATH` docstring. The CSRF
+    cookie must be scoped broadly enough (`Path=/`) that a frontend page at
+    ANY path (`/dashboard/...`, `/login`, ...) can read it via
+    `document.cookie`; scoping it to a backend-only path silently breaks
+    every silent session-refresh on every real page."""
+    response, _ = _register(db_backed_client)
+    raw = _set_cookie_header_for(response, settings.csrf_cookie_name)
+    assert "path=/;" in raw.lower() or raw.lower().rstrip().endswith("path=/")
+    assert "path=/api/v1/auth" not in raw.lower()
+
+
+def test_refresh_cookie_stays_narrowly_scoped_to_auth_routes(db_backed_client: TestClient):
+    """The refresh token cookie is HttpOnly (JS never reads it), so unlike
+    the CSRF cookie it should stay narrowly scoped — sent only on requests
+    to `/api/v1/auth/*`, never on every ordinary API call."""
+    response, _ = _register(db_backed_client)
+    raw = _set_cookie_header_for(response, settings.refresh_cookie_name)
+    assert "path=/api/v1/auth" in raw.lower()
+
+
 def test_registration_creates_user_tenant_and_owner_membership_atomically(
     db_backed_client: TestClient, db_session: Session
 ):

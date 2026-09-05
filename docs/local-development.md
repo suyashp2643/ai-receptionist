@@ -404,3 +404,78 @@ the test file's own docstring for why it asserts on `violations` directly
 rather than the package's `toHaveNoViolations()` custom matcher (that
 matcher's ambient TypeScript augmentation didn't resolve cleanly against
 this project's `tsc --noEmit`).
+
+## 6. Integrations: outbox worker and CLI (Phase 8)
+
+Full contract for what gets sent/received: `docs/integration-contracts.md`.
+
+**One-time setup** — generate a local encryption key (required before
+creating any connector that stores a signing secret) and set it in
+`backend/.env`:
+
+```bash
+python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# INTEGRATION_ENCRYPTION_KEY=<paste the output>
+```
+
+**Processing the outbox** — there is no broker; a small CLI drives the
+same worker function the delivery logic uses in production:
+
+```bash
+cd backend
+.venv/bin/python scripts/process_integration_outbox.py status          # counts by status, no payload bodies printed
+.venv/bin/python scripts/process_integration_outbox.py process-once     # claim + attempt one batch, then exit
+.venv/bin/python scripts/process_integration_outbox.py loop --max-iterations 20 --poll-interval-seconds 2
+.venv/bin/python scripts/process_integration_outbox.py retry-dead-letter --tenant-id <uuid> --event-id <uuid> --actor-user-id <uuid>
+```
+
+`loop` with no `--max-iterations` runs until killed — fine for a local
+dev terminal, never something to background unattended without also
+handling restarts.
+
+**Testing a real webhook delivery locally** without any real network
+contact: run a tiny local HTTP receiver (loopback only) and point a
+`webhook`-type connection at it —
+
+```bash
+python3 -m http.server 8934 --bind 127.0.0.1
+```
+
+then create a connection with `connector_type: "webhook"`,
+`config.destination_url: "http://127.0.0.1:8934/"`, and a signing secret,
+via the dashboard (`/dashboard/integrations/new`) or the API directly
+(`docs/api.md`'s "Integrations management" section). Plain `http://` to a
+loopback destination is allowed only because
+`INTEGRATION_ALLOW_HTTP_FOR_LOOPBACK` defaults to `true` in development —
+see `app/core/ssrf_guard.py`.
+
+**Dashboard UI**: `/dashboard/integrations` (list + health summary),
+`/dashboard/integrations/new` (create), `/dashboard/integrations/{id}`
+(configure, rotate secrets/keys, field-mapping preview),
+`/dashboard/integrations/{id}/deliveries` (history + dead-letter
+replay), and `/dashboard/integrations/lab` — a one-click, zero-network
+demonstration of the whole contract (qualified-lead production, signed
+inbound delivery, retry/dead-letter/replay, revoked-key and
+rotated-secret rejection) using only the `mock` connector type, so it
+needs no real credentials and contacts nothing external. Useful as a
+first stop before wiring a real connection by hand.
+
+**Producing `conversation.abandoned` locally** — this event has no
+automatic scheduler; run the sweep CLI explicitly:
+
+```bash
+cd backend
+.venv/bin/python scripts/sweep_stale_conversations.py --stale-after-minutes 60
+.venv/bin/python scripts/sweep_stale_conversations.py --stale-after-minutes 60 --batch-limit 50 --tenant-id <uuid>
+```
+
+Then run the outbox worker CLI above to actually deliver the resulting
+event.
+
+**Running only the Phase 8 tests**:
+
+```bash
+cd backend
+.venv/bin/python -m pytest -k phase8 -q                    # everything Phase 8, including multiconn
+.venv/bin/python -m pytest -k phase8 -m "not multiconn" -q  # Phase 8, excluding the real-DB concurrency suite
+```

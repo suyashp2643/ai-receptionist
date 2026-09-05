@@ -16,11 +16,14 @@ import uuid
 
 from sqlalchemy.orm import Session
 
+from app.integrations import payload_builders
+from app.integrations.envelope import EventType
+from app.models.contact import Contact
 from app.models.conversation import Conversation
 from app.models.enquiry import Enquiry
 from app.models.enums import EnquiryStatus
 from app.repositories.enquiry import EnquiryRepository
-from app.services import activity_service
+from app.services import activity_service, outbox_producer_service
 from app.services.concurrency import apply_versioned_update
 
 # The allowed pipeline: keys are current statuses, values are the set of
@@ -78,6 +81,8 @@ def upsert_enquiry_from_conversation(
 ) -> Enquiry:
     repo = EnquiryRepository(db, tenant_id)
     enquiry = repo.get_by_conversation_id(conversation.id)
+    is_new = enquiry is None
+    was_qualified = enquiry.qualification_complete if enquiry is not None else False
 
     if enquiry is None:
         enquiry = Enquiry(
@@ -100,6 +105,33 @@ def upsert_enquiry_from_conversation(
             enquiry.contact_id = contact_id
 
     db.flush()
+
+    # Phase 8 event production. Both checks fire at most once per enquiry's
+    # lifetime (creation is a one-time transition by definition; the
+    # qualification-completed check is gated on the False->True edge, not
+    # "is currently complete", so a conversation that stays qualified across
+    # many further turns never re-fires enquiry.qualified).
+    if is_new or (not was_qualified and enquiry.qualification_complete):
+        contact = db.get(Contact, enquiry.contact_id) if enquiry.contact_id else None
+        if is_new:
+            outbox_producer_service.produce_event(
+                db,
+                tenant_id=tenant_id,
+                event_type=EventType.ENQUIRY_CREATED,
+                payload=payload_builders.enquiry_created(enquiry, contact=contact),
+                dedup_key=f"enquiry.created:{enquiry.id}",
+                correlation_id=conversation.id,
+            )
+        if not was_qualified and enquiry.qualification_complete:
+            outbox_producer_service.produce_event(
+                db,
+                tenant_id=tenant_id,
+                event_type=EventType.ENQUIRY_QUALIFIED,
+                payload=payload_builders.enquiry_qualified(enquiry, contact=contact),
+                dedup_key=f"enquiry.qualified:{enquiry.id}",
+                correlation_id=conversation.id,
+            )
+
     return enquiry
 
 
@@ -140,6 +172,13 @@ def update_status(
         entity_type="enquiry",
         entity_id=enquiry.id,
         metadata={"from": current.value, "to": new_status.value},
+    )
+    outbox_producer_service.produce_event(
+        db,
+        tenant_id=tenant_id,
+        event_type=EventType.ENQUIRY_STATUS_CHANGED,
+        payload=payload_builders.enquiry_status_changed(enquiry, previous_status=current.value),
+        dedup_key=f"enquiry.status_changed:{enquiry.id}:{enquiry.version}",
     )
     db.flush()
     return enquiry

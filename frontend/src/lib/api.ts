@@ -59,9 +59,33 @@ async function readError(response: Response): Promise<{ message: string; details
   }
 }
 
+/** De-dupes concurrent `refreshAccessToken()` callers onto one in-flight
+ * request. Without this, two callers racing on the same still-valid refresh
+ * cookie (e.g. React Strict Mode's deliberate double-invoke of
+ * `AuthProvider`'s mount effect in dev, or two components each independently
+ * retrying their own 401 at the same time) would each send the SAME raw
+ * refresh token to `/api/v1/auth/refresh`. The backend rotates the refresh
+ * token on every use and treats a second use of an already-rotated token as
+ * reuse — a theft signal that revokes the entire session family (see
+ * `test_refresh_token_reuse_revokes_entire_family`) — so an un-deduped
+ * concurrent refresh could log the user out far more severely than "just"
+ * this session. Reset to `null` once the request settles (success or
+ * failure) so the *next* genuinely separate refresh (e.g. after the access
+ * token expires again later) starts a fresh request rather than replaying a
+ * stale result. */
+let inFlightRefresh: Promise<boolean> | null = null;
+
 /** Uses the HttpOnly refresh cookie (via the browser, automatically) plus
  * the double-submit CSRF cookie to obtain a fresh access token. */
-export async function refreshAccessToken(): Promise<boolean> {
+export function refreshAccessToken(): Promise<boolean> {
+  if (inFlightRefresh) return inFlightRefresh;
+  inFlightRefresh = performRefresh().finally(() => {
+    inFlightRefresh = null;
+  });
+  return inFlightRefresh;
+}
+
+async function performRefresh(): Promise<boolean> {
   const csrfToken = readCookie(getCsrfCookieName());
   const response = await rawRequest("/api/v1/auth/refresh", {
     method: "POST",

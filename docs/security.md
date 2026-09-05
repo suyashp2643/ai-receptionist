@@ -1011,3 +1011,205 @@ compliance certification — matching this project's existing "no
 compliance claim" posture (see "What we don't claim" under Security in
 `frontend/src/app/(marketing)/security/page.tsx`, and the equivalent
 honest-limitations framing used throughout this document).
+
+## Secure integration foundation threat model (Phase 8)
+
+Full external-facing contract: `docs/integration-contracts.md`. This
+section is the internal security review.
+
+**Secrets are never stored in plaintext.** An outbound webhook signing
+secret is Fernet-encrypted (`app/core/crypto.py`) before it ever reaches
+the database, gated behind `Settings.require_integration_encryption_key()`
+— a connector type requiring a signing secret cannot be created at all if
+`INTEGRATION_ENCRYPTION_KEY` is unset; there is no silent plaintext
+fallback anywhere in this path. An inbound API key is generated with 256
+bits of entropy, shown to the caller exactly once, and stored only as a
+SHA-256 hash (fast hash deliberately — a random high-entropy token, not a
+human password, so Argon2's deliberate slowness buys nothing; see
+`app/core/security.py`'s own precedent for refresh tokens). Every activity
+log entry for a secret-touching action (created, rotated, inbound key
+issued) records that the action happened and who did it, never the
+secret's value — verified by an automated test
+(`tests/test_phase8_integrations_api.py::TestInboundApiKey`) that greps
+the entire detail-response body for the raw key and asserts it is absent.
+
+**SSRF is the primary threat this phase introduces**, since a
+webhook-family connection's destination URL is owner/admin-controlled,
+tenant-adjacent input aimed at making *this server* originate an HTTP
+request — a classic vector for reaching cloud metadata endpoints or
+internal services. `app/core/ssrf_guard.py` is the single choke point
+every connector routes through, both when a connection is saved and again
+immediately before every delivery attempt (DNS can change between the
+two): scheme allow-listed to `https://` in general, embedded userinfo
+(`https://user:pass@host`) rejected outright, every DNS-resolved address
+(IPv4 and IPv6, including IPv4-mapped IPv6 explicitly unwrapped and
+re-checked) rejected if loopback/link-local/private/reserved/multicast/
+unspecified via Python's own `ipaddress` module rather than a hand-rolled
+range table, hostname lowercased and trailing-dot-stripped before
+resolution. Plain `http://` is permitted **only** when every resolved
+address is loopback **and** `INTEGRATION_ALLOW_HTTP_FOR_LOOPBACK` is set
+(local-dev-only default) — an `https://` destination that happens to
+resolve to loopback gets no special treatment, a deliberate fix applied
+during this phase's own review (an earlier draft would have let a
+tenant's "test" connection targeting `https://127.0.0.1` slip through in
+production once TLS was used, which defeated the purpose of gating the
+exception on scheme). Verified by a 20-case automated suite
+(`tests/test_phase8_ssrf_guard.py`) covering the cloud-metadata address,
+every RFC1918 range, multicast, unspecified, IPv6 loopback/link-local/
+unique-local, and the http/https × loopback/non-loopback matrix — with
+zero real DNS/network calls (IP literals, or a mocked `getaddrinfo` for
+the two cases that genuinely need a hostname).
+
+Redirects are never followed on any outbound delivery
+(`follow_redirects=False`) — a receiver that responds with a redirect is
+treated as a permanent failure, not retried through the redirect target,
+which would otherwise reopen the exact SSRF window the guard closes.
+
+**The TOCTOU/DNS-rebinding gap between validation and connection is
+closed by IP pinning, not just narrowed by re-validation.**
+`app/integrations/pinned_transport.py` forces the actual TCP connection
+for every delivery attempt to the exact IP address
+`ssrf_guard.validate_destination_url` just validated, via a custom
+`httpcore.NetworkBackend` (the same public extension point
+`httpcore.ConnectionPool(network_backend=...)` takes), instead of trusting
+`httpx`/`httpcore`'s own independent DNS resolution at connect time. This
+is safe without weakening TLS: httpcore derives both the TLS SNI value
+and the certificate-hostname-verification target from the *request's own
+origin host*, never from whatever the network backend actually dialed —
+verified against the installed httpcore version by
+`tests/test_phase8_ssrf_pinning.py`, which asserts the real TLS handshake
+still validates the real hostname's certificate even though the socket
+was forced elsewhere. Each delivery attempt, including every retry,
+independently re-resolves, re-validates, and re-pins from scratch — a
+hostname that starts resolving to a forbidden address is caught on the
+very next attempt, not just the first.
+
+**What this does not, and cannot, protect against — stated plainly, not
+oversold**: if the authoritative DNS answer is *already* the attacker's
+chosen address at the exact moment `ssrf_guard.validate_destination_url`
+performs its own `socket.getaddrinfo` call, validation sees only that
+(already-compromised) answer; pinning then correctly guarantees the
+connection uses exactly what was validated, but validation itself cannot
+detect that the single answer it received was itself misleading. This
+codebase does not claim complete DNS-rebinding protection — pinning
+closes the gap *between* validation and connection, not a compromised DNS
+response *at* the moment of validation. **Production deployment
+requirement**: this application-level pinning is defense-in-depth, not a
+substitute for network-level egress filtering. A production deployment
+must additionally restrict the backend service's own network egress (a
+security-group/NACL/proxy policy denying outbound access to private,
+loopback, and link-local ranges) so a compromised or misconfigured DNS
+answer cannot be reached even if this code's own validation were somehow
+bypassed.
+
+**Every signed request (both directions) uses HMAC-SHA256** with a
+timestamp + delivery-id + event-id + schema-version + body signing
+string, verified with `hmac.compare_digest` (never `==`) — see
+`app/integrations/signing.py` and `docs/integration-contracts.md` §4 for
+the exact scheme. A receiver is documented to reject a request whose
+timestamp is more than 300 seconds stale, bounding replay of a captured
+signed request. Because `delivery_id` is part of the signed material, a
+retried delivery produces a different signature per attempt — signature
+equality is never usable as a de-duplication signal by design; that is
+`event_id`'s job.
+
+**The inbound API is authentication-oracle-resistant by construction**:
+every possible authentication failure (unknown API key, no signing secret
+configured on the resolved connection, an undecryptable stored secret, a
+bad signature, an expired timestamp) raises the same `InboundAuthError`
+and is mapped to the exact same generic `401 "Invalid credentials."` —
+verified by `tests/test_phase8_integrations_inbound_api.py`'s
+`TestAuthentication` class, which exercises five distinct failure modes
+and asserts `401` for each without differentiating the response.
+
+**No arbitrary mutation via the inbound API.** Processing an inbound
+event only ever writes an append-only `InboundIntegrationEvent` row and
+an `ActivityEvent` — `app/services/integration_inbound_service.py` has no
+import of, and no call into, `enquiry_service`/
+`appointment_request_service`/`human_handoff_service`. Verified by an
+automated test that snapshots every business table's row-id set before
+and after processing a real signed inbound event and asserts none
+changed (`tests/test_phase8_integrations_inbound_api.py::TestNoArbitraryMutation`).
+Event types accepted at all are a closed, two-value Pydantic enum
+(`InboundEventType`) — an unrecognized value is rejected by FastAPI's own
+validation (`422`) before any service code runs, not filtered ad hoc.
+
+**Inbound idempotency prevents both silent data loss and silent data
+corruption**: a repeated `external_event_id` with an identical body is a
+harmless no-op (`200 "duplicate"`); the same id with a *different* body
+is a `409` conflict, never silently overwritten or silently ignored —
+the sender is forced to either confirm the id is a genuine retry or pick
+a new one.
+
+**No autonomous outbound action from a Sales Employee connection.** This
+is a scope guarantee about the entire codebase, not one connector's
+config: nothing anywhere in this repository sends an email, places a
+call, or sends an SMS/message on a lead's behalf. A Sales Employee
+connection can only ever deliver a read-only event notification outward;
+see `app/integrations/connectors/sales_employee.py`'s own docstring. Its
+allow-listed event-type set additionally excludes
+`safety.escalation_detected` (enforced both at config-save time in
+`app/services/integration_connection_service.py` and, defensively, again
+at production time in `app/services/outbox_producer_service.py`) — a
+safety-relevant event is for human dashboard review, never a sales
+workflow signal.
+
+**`safety.escalation_detected` never carries the triggering message
+text** — only a classification category (e.g. `clinic_urgent`) and
+context ids. Verified live and by an automated test
+(`tests/test_phase8_orchestrator_wiring.py`) that sends a real clinic
+emergency message ("chest pain and can't breathe") through the full
+orchestrator, asserts the outbox payload's category is correct, and
+asserts the literal substring "chest pain" is absent from the entire
+serialized payload — the strongest form of this assertion available
+short of a full negative-space audit of every payload builder.
+
+**Delivery is at-least-once, documented honestly, not oversold.** See
+`docs/integration-contracts.md` §3 and §6 for the full accounting,
+including the two other honestly-documented limitations (single-key
+encryption with no online rotation logic; best-effort, non-atomic
+connection health counters under concurrency — never a delivery gate or
+security boundary, so acceptable drift).
+
+**Dashboard access to integrations follows this app's existing
+tenant-membership RBAC, with nothing integration-specific bolted on.**
+Owner/admin can create, edit, verify, enable/pause/disable, rotate
+secrets and keys, and replay a dead-lettered delivery; a member gets
+read-only access — every mutating dashboard route re-checks role
+server-side (never trusting the frontend's own hiding of a button), so a
+member calling a mutating endpoint directly still gets `403`. A
+non-member of the tenant gets `404`, not `403`, on every integration
+route — consistent with this codebase's existing pattern of not
+confirming a tenant's existence to a non-member. **Neither an inbound API
+key nor a rotated signing secret is ever persisted client-side**: each is
+held only in the dashboard's own React component state, shown once,
+and discarded on dismiss or navigation — never written to
+`localStorage`, `sessionStorage`, a URL, a React-Query cache, or an error
+message, and never returned by any subsequent API response (only a
+prefix + last four characters are). The integration lab
+(`/dashboard/integrations/lab`, `docs/integration-contracts.md` §9) is
+gated behind the same owner/admin check as every other mutating page.
+
+**`conversation.abandoned` has a real, bounded producer with no implicit
+scheduler.** `app/services/conversation_sweep_service.py` is a plain
+function — given a session and a stale-after threshold, it finds ACTIVE
+conversations idle past that threshold (bounded by an explicit batch
+limit, default 100, capped at 500) and transitions them, producing the
+event exactly the way `conversation.completed` is produced elsewhere. It
+is invoked only by an explicit CLI
+(`scripts/sweep_stale_conversations.py`); nothing in this codebase
+schedules it automatically. This was a deliberate choice over silently
+advertising an event with no way for it to ever actually occur — the
+event type's own schema, config allow-list entry, and dashboard checkbox
+would otherwise be dead promises.
+
+**Concurrency was verified with real separate database connections**, not
+just sequential calls in one session — `tests/integration/test_phase8_outbox_worker.py`
+(marked `multiconn`, per this document's existing Phase 4/6 precedent for
+why that distinction matters) proves two workers claiming from the same
+10-row backlog via real `session_scope()`-backed sessions never claim the
+same row (`FOR UPDATE SKIP LOCKED`) and leaves no `idle in transaction`
+session or held lock on `integration_outbox_events` afterward, using the
+same `pg_stat_activity`/`pg_locks` introspection helpers this document's
+Phase 4 concurrency section already established as this codebase's
+standard for proving a concurrency claim rather than merely asserting it.

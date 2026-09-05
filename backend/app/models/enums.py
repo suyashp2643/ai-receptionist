@@ -137,3 +137,82 @@ class PreferredContactMethod(str, enum.Enum):
     EMAIL = "email"
     PHONE = "phone"
     EITHER = "either"
+
+
+# --- Phase 8: integrations ---
+
+
+class IntegrationConnectorType(str, enum.Enum):
+    """No provider-specific type may escape the adapter boundary (see
+    app/integrations/connectors/) — this is the one place a connector
+    "kind" is named, and every adapter registers under exactly one of
+    these via the connector factory."""
+
+    MOCK = "mock"
+    WEBHOOK = "webhook"
+    REVENUE_BRAIN = "revenue_brain"
+    SALES_EMPLOYEE = "sales_employee"
+
+
+class IntegrationConnectionStatus(str, enum.Enum):
+    """Deliberately five distinct, mutually-exclusive states — never a
+    boolean "connected" flag — so the dashboard/API can never claim a
+    connector is working merely because it was configured. See
+    docs/security.md's Phase 8 section for the exact promotion rules.
+
+    CONFIGURED: created, has never passed a verify_connection() call.
+    VERIFIED: verify_connection() has succeeded at least once and no
+        subsequent delivery has failed enough times to become FAILING.
+    PAUSED: an owner/admin explicitly paused delivery — no outbox events
+        are claimed for this connection while paused.
+    FAILING: was VERIFIED, but recent consecutive delivery attempts have
+        failed (see failure_count) — deliveries still enqueue and still
+        attempt delivery (this is a health signal, not a delivery gate).
+    DISABLED: an owner/admin explicitly, deliberately turned this
+        connection off — same delivery-skipping behavior as PAUSED, but
+        communicates permanence rather than a temporary pause.
+    """
+
+    CONFIGURED = "configured"
+    VERIFIED = "verified"
+    PAUSED = "paused"
+    FAILING = "failing"
+    DISABLED = "disabled"
+
+
+# Statuses in which the worker will still claim and attempt delivery.
+INTEGRATION_DELIVERABLE_STATUSES = frozenset(
+    {
+        IntegrationConnectionStatus.CONFIGURED,
+        IntegrationConnectionStatus.VERIFIED,
+        IntegrationConnectionStatus.FAILING,
+    }
+)
+
+
+class OutboxEventStatus(str, enum.Enum):
+    """PENDING -> CLAIMED -> (DELIVERED | PENDING again on retryable
+    failure | DEAD_LETTER on exhausted attempts). CLAIMED rows past their
+    lease expiry are treated as PENDING again by the claim query itself
+    (see app/services/outbox_worker_service.py) rather than a separate
+    status transition, so a crashed worker never needs manual recovery."""
+
+    PENDING = "pending"
+    CLAIMED = "claimed"
+    DELIVERED = "delivered"
+    DEAD_LETTER = "dead_letter"
+
+
+class DeliveryAttemptStatus(str, enum.Enum):
+    """Recorded once per attempt, never mutated afterward — the outbox
+    event's own status (above) is the mutable "current state"; this is
+    permanent attempt history."""
+
+    SUCCESS = "success"
+    RETRYABLE_FAILURE = "retryable_failure"
+    PERMANENT_FAILURE = "permanent_failure"
+
+
+class InboundEventStatus(str, enum.Enum):
+    PROCESSED = "processed"
+    REJECTED = "rejected"

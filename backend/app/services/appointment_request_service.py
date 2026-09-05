@@ -10,13 +10,16 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session
 
 from app.core.timezones import VALID_TIMEZONES, normalize_timezone
+from app.integrations import payload_builders
+from app.integrations.envelope import EventType
 from app.models.appointment_request import AppointmentRequest
 from app.models.business_location import BusinessLocation
+from app.models.contact import Contact
 from app.models.enums import AppointmentRequestStatus
 from app.repositories.appointment_request import AppointmentRequestRepository
 from app.repositories.business_location import BusinessLocationRepository
 from app.repositories.service import ServiceRepository
-from app.services import activity_service
+from app.services import activity_service, outbox_producer_service
 from app.services.concurrency import apply_versioned_update
 
 # Owner/admin-only workflow (see app/api/deps.py's require_tenant_role usage
@@ -148,6 +151,15 @@ def create_appointment_request(
     )
     repo.add(appointment_request)
     db.flush()
+    contact = db.get(Contact, contact_id) if contact_id else None
+    outbox_producer_service.produce_event(
+        db,
+        tenant_id=tenant_id,
+        event_type=EventType.APPOINTMENT_REQUEST_CREATED,
+        payload=payload_builders.appointment_request_created(appointment_request, contact=contact),
+        dedup_key=f"appointment_request.created:{appointment_request.id}",
+        correlation_id=conversation_id,
+    )
     return appointment_request
 
 
@@ -188,6 +200,13 @@ def update_status(
         entity_type="appointment_request",
         entity_id=appointment_request.id,
         metadata={"from": current.value, "to": new_status.value},
+    )
+    outbox_producer_service.produce_event(
+        db,
+        tenant_id=tenant_id,
+        event_type=EventType.APPOINTMENT_REQUEST_STATUS_CHANGED,
+        payload=payload_builders.appointment_request_status_changed(appointment_request, previous_status=current.value),
+        dedup_key=f"appointment_request.status_changed:{appointment_request.id}:{appointment_request.version}",
     )
     db.flush()
     return appointment_request
